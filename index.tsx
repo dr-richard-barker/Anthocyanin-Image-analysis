@@ -23,8 +23,11 @@ import {
   CheckCircle,
   AlertCircle,
   Wand2,
-  MousePointer2, // Added MousePointer2
-  RefreshCw
+  MousePointer2, 
+  RefreshCw,
+  Sun,
+  Moon,
+  Disc
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import JSZip from 'jszip';
@@ -80,8 +83,13 @@ interface AppState {
   processedImageURL: string | null;
   
   // Calibration
-  calibrationColor: { r: number, g: number, b: number } | null;
+  activeCalibrationTarget: 'gray' | 'white' | 'black';
+  calibrationColor: { r: number, g: number, b: number } | null; // Gray
   calibrationROI: Shape | null;
+  whitePointColor: { r: number, g: number, b: number } | null;
+  whitePointROI: Shape | null;
+  blackPointColor: { r: number, g: number, b: number } | null;
+  blackPointROI: Shape | null;
 
   // Segmentation Editing
   exclusionZones: Shape[];
@@ -195,8 +203,16 @@ const App = () => {
     isProcessing: false,
     reportSummary: '',
     processedImageURL: null,
+    
+    // Calibration Init
+    activeCalibrationTarget: 'gray',
     calibrationColor: null,
     calibrationROI: null,
+    whitePointColor: null,
+    whitePointROI: null,
+    blackPointColor: null,
+    blackPointROI: null,
+
     exclusionZones: [],
     roiGroups: [],
     activeGroupId: null,
@@ -243,8 +259,13 @@ const App = () => {
         exclusionZones: [], 
         roiGroups: [], 
         activeGroupId: null,
+        // Reset Calibration
         calibrationColor: null,
         calibrationROI: null,
+        whitePointColor: null,
+        whitePointROI: null,
+        blackPointColor: null,
+        blackPointROI: null,
         reportSummary: '',
         processedImageURL: null,
         selectedShapeId: null
@@ -263,11 +284,13 @@ const App = () => {
     state.activeTab, 
     state.visualizationMode,
     state.calibrationColor, 
+    state.whitePointColor,
+    state.blackPointColor,
     state.exclusionZones, 
     state.roiGroups,
     loadedImageRef.current,
     state.regressionParams,
-    state.selectedShapeId // Re-render overlay when selection changes
+    state.selectedShapeId
   ]);
 
   const runPipeline = () => {
@@ -301,11 +324,34 @@ const App = () => {
 
       const optimizedExclusion = state.exclusionZones.map(s => ({ shape: s, bbox: getBoundingBox(s) }));
 
+      // Calibration Parameters
       let rScale = 1, gScale = 1, bScale = 1;
-      if (state.calibrationColor) {
-        rScale = 128 / (state.calibrationColor.r || 1);
-        gScale = 128 / (state.calibrationColor.g || 1);
-        bScale = 128 / (state.calibrationColor.b || 1);
+      let minR = 0, minG = 0, minB = 0;
+      let rangeR = 255, rangeG = 255, rangeB = 255;
+      let useContrastStretch = false;
+      let useGrayBalance = false;
+
+      if (state.whitePointColor && state.blackPointColor) {
+         // Priority 1: Full Range Correction if both White and Black are set
+         useContrastStretch = true;
+         minR = state.blackPointColor.r;
+         minG = state.blackPointColor.g;
+         minB = state.blackPointColor.b;
+         rangeR = (state.whitePointColor.r - minR) || 1;
+         rangeG = (state.whitePointColor.g - minG) || 1;
+         rangeB = (state.whitePointColor.b - minB) || 1;
+      } else if (state.whitePointColor) {
+         // Priority 2: White Balance only (Assume White = 255, 255, 255)
+         useGrayBalance = true;
+         rScale = 255 / (state.whitePointColor.r || 1);
+         gScale = 255 / (state.whitePointColor.g || 1);
+         bScale = 255 / (state.whitePointColor.b || 1);
+      } else if (state.calibrationColor) {
+         // Priority 3: Gray Balance (Assume Gray = 128, 128, 128)
+         useGrayBalance = true;
+         rScale = 128 / (state.calibrationColor.r || 1);
+         gScale = 128 / (state.calibrationColor.g || 1);
+         bScale = 128 / (state.calibrationColor.b || 1);
       }
 
       const groupStats = state.roiGroups.map(g => ({
@@ -322,10 +368,15 @@ const App = () => {
         let g = data[i + 1];
         let b = data[i + 2];
 
-        if (state.calibrationColor) {
-          r = Math.min(255, r * rScale);
-          g = Math.min(255, g * gScale);
-          b = Math.min(255, b * bScale);
+        // Apply Calibration
+        if (useContrastStretch) {
+           r = Math.max(0, Math.min(255, (r - minR) / rangeR * 255));
+           g = Math.max(0, Math.min(255, (g - minG) / rangeG * 255));
+           b = Math.max(0, Math.min(255, (b - minB) / rangeB * 255));
+        } else if (useGrayBalance) {
+           r = Math.min(255, r * rScale);
+           g = Math.min(255, g * gScale);
+           b = Math.min(255, b * bScale);
         }
 
         const exg = (2 * g) - r - b;
@@ -426,7 +477,6 @@ const App = () => {
         };
       });
 
-      // Avoid infinite loop by only updating if stats change significantly
       const currentStatsStr = JSON.stringify(state.roiGroups.map(g => g.stats));
       const newStatsStr = JSON.stringify(finalGroups.map(g => g.stats));
       
@@ -506,29 +556,33 @@ const App = () => {
 
     if (state.activeTab !== 'report') {
         state.exclusionZones.forEach(shape => drawShape(shape, '#ef4444', true, shape.id === state.selectedShapeId));
-        if (state.calibrationROI && state.activeTab === 'calibration') {
-          drawShape(state.calibrationROI, '#ffffff', false, state.calibrationROI.id === state.selectedShapeId);
+        
+        // Draw Calibration Shapes
+        if (state.activeTab === 'calibration') {
+           if (state.calibrationROI) drawShape(state.calibrationROI, '#ffffff', false, state.calibrationROI.id === state.selectedShapeId);
+           if (state.whitePointROI) drawShape(state.whitePointROI, '#06b6d4', false, state.whitePointROI.id === state.selectedShapeId);
+           if (state.blackPointROI) drawShape(state.blackPointROI, '#f97316', false, state.blackPointROI.id === state.selectedShapeId);
         }
+
         if (state.activeTab === 'analysis') {
           state.roiGroups.forEach(group => {
             group.shapes.forEach(shape => drawShape(shape, group.color, false, shape.id === state.selectedShapeId));
           });
         }
-        if (dragState && dragState.mode === 'create') {
-           // We'll draw the creating shape from a temp state if we had it, but currently we draw directly to exclusionZones/etc on mouse up
-           // Re-implementing a temp draw would be better, but we can reuse the `state` logic for now.
-        }
     }
   };
 
-  const getShapeUnderCursor = (x: number, y: number): { shape: Shape, group?: ROIGroup } | null => {
+  const getShapeUnderCursor = (x: number, y: number): { shape: Shape, group?: ROIGroup, type?: 'gray'|'white'|'black' } | null => {
       // Check active tab content
       if (state.activeTab === 'segmentation') {
           for (const s of state.exclusionZones) {
               if (isPointInShape(x, y, s)) return { shape: s };
           }
-      } else if (state.activeTab === 'calibration' && state.calibrationROI) {
-          if (isPointInShape(x, y, state.calibrationROI)) return { shape: state.calibrationROI };
+      } else if (state.activeTab === 'calibration') {
+          // Check in reverse order of drawing or importance
+          if (state.blackPointROI && isPointInShape(x, y, state.blackPointROI)) return { shape: state.blackPointROI, type: 'black' };
+          if (state.whitePointROI && isPointInShape(x, y, state.whitePointROI)) return { shape: state.whitePointROI, type: 'white' };
+          if (state.calibrationROI && isPointInShape(x, y, state.calibrationROI)) return { shape: state.calibrationROI, type: 'gray' };
       } else if (state.activeTab === 'analysis') {
           for (const g of state.roiGroups) {
               for (const s of g.shapes) {
@@ -553,7 +607,10 @@ const App = () => {
       if (state.activeTab === 'segmentation') {
           setState(s => ({...s, exclusionZones: s.exclusionZones.map(sh => sh.id === newShape.id ? newShape : sh)}));
       } else if (state.activeTab === 'calibration') {
-          setState(s => ({...s, calibrationROI: newShape}));
+          // Identify which one we are updating
+          if (state.calibrationROI?.id === newShape.id) setState(s => ({...s, calibrationROI: newShape}));
+          else if (state.whitePointROI?.id === newShape.id) setState(s => ({...s, whitePointROI: newShape}));
+          else if (state.blackPointROI?.id === newShape.id) setState(s => ({...s, blackPointROI: newShape}));
       } else if (state.activeTab === 'analysis') {
           setState(s => ({
               ...s, 
@@ -580,8 +637,11 @@ const App = () => {
             let selectedShape: Shape | null = null;
             // Find the shape object
             if (state.activeTab === 'segmentation') selectedShape = state.exclusionZones.find(s => s.id === state.selectedShapeId) || null;
-            else if (state.activeTab === 'calibration') selectedShape = state.calibrationROI?.id === state.selectedShapeId ? state.calibrationROI : null;
-            else if (state.activeTab === 'analysis') {
+            else if (state.activeTab === 'calibration') {
+                 if (state.calibrationROI?.id === state.selectedShapeId) selectedShape = state.calibrationROI;
+                 else if (state.whitePointROI?.id === state.selectedShapeId) selectedShape = state.whitePointROI;
+                 else if (state.blackPointROI?.id === state.selectedShapeId) selectedShape = state.blackPointROI;
+            } else if (state.activeTab === 'analysis') {
                  state.roiGroups.forEach(g => {
                      const f = g.shapes.find(s => s.id === state.selectedShapeId);
                      if (f) selectedShape = f;
@@ -600,7 +660,12 @@ const App = () => {
         // 2. Check for new selection or move
         const hit = getShapeUnderCursor(x, y);
         if (hit) {
-            setState(s => ({ ...s, selectedShapeId: hit.shape.id, activeGroupId: hit.group?.id || s.activeGroupId }));
+            setState(s => ({ 
+              ...s, 
+              selectedShapeId: hit.shape.id, 
+              activeGroupId: hit.group?.id || s.activeGroupId,
+              activeCalibrationTarget: hit.type || s.activeCalibrationTarget // Auto switch context on select
+            }));
             setDragState({ mode: 'move', startPoint, activeHandle: null, initialPoints: JSON.parse(JSON.stringify(hit.shape.points)) });
         } else {
             setState(s => ({ ...s, selectedShapeId: null }));
@@ -614,11 +679,16 @@ const App = () => {
             points: [startPoint, startPoint]
         };
         
-        // Add immediately to state so we can see it drawing
+        // Add immediately to state
         if (state.activeTab === 'segmentation') {
              setState(s => ({...s, exclusionZones: [...s.exclusionZones, newShape], selectedShapeId: newShape.id }));
         } else if (state.activeTab === 'calibration') {
-             setState(s => ({...s, calibrationROI: newShape, selectedShapeId: newShape.id }));
+             // Set specific calibration ROI
+             const updates: Partial<AppState> = { selectedShapeId: newShape.id };
+             if (state.activeCalibrationTarget === 'gray') updates.calibrationROI = newShape;
+             else if (state.activeCalibrationTarget === 'white') updates.whitePointROI = newShape;
+             else if (state.activeCalibrationTarget === 'black') updates.blackPointROI = newShape;
+             setState(s => ({...s, ...updates }));
         } else if (state.activeTab === 'analysis') {
              if (state.activeGroupId) {
                  setState(s => ({
@@ -650,15 +720,16 @@ const App = () => {
     const currentPoint = { x, y };
 
     if (dragState.mode === 'create') {
-        // Update the last added shape
         let shapeId = state.selectedShapeId;
         if (!shapeId) return;
 
-        // Helper to find shape object
         let shape: Shape | undefined;
         if (state.activeTab === 'segmentation') shape = state.exclusionZones.find(s => s.id === shapeId);
-        else if (state.activeTab === 'calibration') shape = state.calibrationROI?.id === shapeId ? state.calibrationROI : undefined;
-        else if (state.activeTab === 'analysis') {
+        else if (state.activeTab === 'calibration') {
+            if (state.calibrationROI?.id === shapeId) shape = state.calibrationROI;
+            else if (state.whitePointROI?.id === shapeId) shape = state.whitePointROI;
+            else if (state.blackPointROI?.id === shapeId) shape = state.blackPointROI;
+        } else if (state.activeTab === 'analysis') {
              state.roiGroups.forEach(g => { if(!shape) shape = g.shapes.find(s => s.id === shapeId); });
         }
 
@@ -677,11 +748,13 @@ const App = () => {
         const dy = y - dragState.startPoint.y;
         
         let shapeId = state.selectedShapeId;
-        // Find shape, update points
         let shape: Shape | undefined;
         if (state.activeTab === 'segmentation') shape = state.exclusionZones.find(s => s.id === shapeId);
-        else if (state.activeTab === 'calibration') shape = state.calibrationROI?.id === shapeId ? state.calibrationROI : undefined;
-        else if (state.activeTab === 'analysis') state.roiGroups.forEach(g => { if(!shape) shape = g.shapes.find(s => s.id === shapeId); });
+        else if (state.activeTab === 'calibration') {
+            if (state.calibrationROI?.id === shapeId) shape = state.calibrationROI;
+            else if (state.whitePointROI?.id === shapeId) shape = state.whitePointROI;
+            else if (state.blackPointROI?.id === shapeId) shape = state.blackPointROI;
+        } else if (state.activeTab === 'analysis') state.roiGroups.forEach(g => { if(!shape) shape = g.shapes.find(s => s.id === shapeId); });
 
         if (shape) {
              const newPoints = dragState.initialPoints.map(p => ({ x: p.x + dx, y: p.y + dy }));
@@ -692,11 +765,13 @@ const App = () => {
         let shapeId = state.selectedShapeId;
         let shape: Shape | undefined;
         if (state.activeTab === 'segmentation') shape = state.exclusionZones.find(s => s.id === shapeId);
-        else if (state.activeTab === 'calibration') shape = state.calibrationROI?.id === shapeId ? state.calibrationROI : undefined;
-        else if (state.activeTab === 'analysis') state.roiGroups.forEach(g => { if(!shape) shape = g.shapes.find(s => s.id === shapeId); });
+        else if (state.activeTab === 'calibration') {
+             if (state.calibrationROI?.id === shapeId) shape = state.calibrationROI;
+             else if (state.whitePointROI?.id === shapeId) shape = state.whitePointROI;
+             else if (state.blackPointROI?.id === shapeId) shape = state.blackPointROI;
+        } else if (state.activeTab === 'analysis') state.roiGroups.forEach(g => { if(!shape) shape = g.shapes.find(s => s.id === shapeId); });
         
         if (shape) {
-            // Logic: Calculate new BBox from handle movement, then map points
             const initBBox = getBoundingBox({ ...shape, points: dragState.initialPoints });
             let newMinX = initBBox.minX;
             let newMaxX = initBBox.maxX;
@@ -724,19 +799,21 @@ const App = () => {
   };
 
   const handleMouseUp = () => {
-    if (dragState?.mode === 'create') {
-        // If created shape is tiny, maybe delete it? Skipping for now.
-        if (state.activeTab === 'calibration' && state.calibrationROI) {
-             calculateCalibrationFromROI(state.calibrationROI);
+    if (dragState?.mode === 'create' || dragState?.mode === 'move' || dragState?.mode === 'resize') {
+        if (state.activeTab === 'calibration') {
+             // Recalculate based on which shape was being modified
+             if (state.calibrationROI && state.selectedShapeId === state.calibrationROI.id) calculateCalibrationFromROI(state.calibrationROI, 'gray');
+             if (state.whitePointROI && state.selectedShapeId === state.whitePointROI.id) calculateCalibrationFromROI(state.whitePointROI, 'white');
+             if (state.blackPointROI && state.selectedShapeId === state.blackPointROI.id) calculateCalibrationFromROI(state.blackPointROI, 'black');
         }
     }
     setDragState(null);
     if (state.activeTool !== 'select') {
-         setState(s => ({ ...s, activeTool: 'select' })); // Reset to select tool after draw
+         setState(s => ({ ...s, activeTool: 'select' }));
     }
   };
 
-  const calculateCalibrationFromROI = (shape: Shape) => {
+  const calculateCalibrationFromROI = (shape: Shape, type: 'gray' | 'white' | 'black') => {
      if (!loadedImageRef.current || !canvasRef.current) return;
      const ctx = canvasRef.current.getContext('2d');
      if (!ctx) return;
@@ -754,7 +831,10 @@ const App = () => {
         }
      }
      if (count > 0) {
-        setState(s => ({ ...s, calibrationColor: { r: rSum / count, g: gSum / count, b: bSum / count } }));
+        const color = { r: rSum / count, g: gSum / count, b: bSum / count };
+        if (type === 'gray') setState(s => ({ ...s, calibrationColor: color }));
+        if (type === 'white') setState(s => ({ ...s, whitePointColor: color }));
+        if (type === 'black') setState(s => ({ ...s, blackPointColor: color }));
      }
   };
 
@@ -1083,7 +1163,20 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
 
               {state.activeTab === 'calibration' && (
                 <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-4">
-                   <span className="text-xs text-slate-500 px-2">Ref Region:</span>
+                   <div className="flex border-r border-slate-700 pr-2 mr-2 gap-1">
+                      <button 
+                        onClick={() => setState(s => ({...s, activeCalibrationTarget: 'gray'}))}
+                        className={`p-1.5 rounded text-xs flex items-center gap-1 transition-colors ${state.activeCalibrationTarget === 'gray' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}
+                      ><Disc size={14}/> Gray</button>
+                      <button 
+                        onClick={() => setState(s => ({...s, activeCalibrationTarget: 'white'}))}
+                        className={`p-1.5 rounded text-xs flex items-center gap-1 transition-colors ${state.activeCalibrationTarget === 'white' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}
+                      ><Sun size={14}/> White</button>
+                      <button 
+                        onClick={() => setState(s => ({...s, activeCalibrationTarget: 'black'}))}
+                        className={`p-1.5 rounded text-xs flex items-center gap-1 transition-colors ${state.activeCalibrationTarget === 'black' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}
+                      ><Moon size={14}/> Black</button>
+                   </div>
                    <button onClick={() => setState(s => ({...s, activeTool: 'select'}))} className={`p-2 rounded ${state.activeTool === 'select' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><MousePointer2 size={16} /></button>
                    <button onClick={() => setState(s => ({...s, activeTool: 'rect'}))} className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Rectangle Region"><Square size={16} /></button>
                    <button onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Circle Region"><CircleIcon size={16} /></button>
@@ -1110,8 +1203,6 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
                     ><ChevronRight size={16}/></button>
                  </div>
               )}
-
-              {/* Demo button removed */}
 
               <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-md text-sm font-medium"><Upload size={16} /> Upload</button>
               <input ref={fileInputRef} type="file" multiple accept=".jpg,.jpeg,.png,.zip" className="hidden" onChange={handleFileUpload} />
@@ -1294,7 +1385,7 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
                 {/* Hints */}
                 <div className="text-xs text-slate-500 flex gap-4">
                   {state.activeTab === 'segmentation' && <span>Use tools to erase background artifacts. Select to move/resize.</span>}
-                  {state.activeTab === 'calibration' && <span>Draw a box/circle over a neutral gray reference card.</span>}
+                  {state.activeTab === 'calibration' && <span>Select a target type (Gray/White/Black) and draw a region.</span>}
                   {state.activeTab === 'analysis' && <span>Use Lasso or Rect tool to define plant groups. Select to edit.</span>}
                 </div>
               </div>
@@ -1334,12 +1425,47 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
                 {state.activeTab === 'calibration' && (
                   <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
                     <h3 className="font-medium text-sm text-slate-200 mb-4 flex items-center gap-2"><Pipette size={16}/> Calibration</h3>
-                    <div className="p-4 bg-slate-950 rounded border border-slate-800 space-y-2">
-                      <div className="flex justify-between text-xs text-slate-400"><span>R</span><span className="text-slate-200 font-mono">{state.calibrationColor?.r.toFixed(1) || '-'}</span></div>
-                      <div className="flex justify-between text-xs text-slate-400"><span>G</span><span className="text-slate-200 font-mono">{state.calibrationColor?.g.toFixed(1) || '-'}</span></div>
-                      <div className="flex justify-between text-xs text-slate-400"><span>B</span><span className="text-slate-200 font-mono">{state.calibrationColor?.b.toFixed(1) || '-'}</span></div>
+                    <div className="space-y-4">
+                       {/* Gray Card */}
+                       <div>
+                          <p className="text-xs text-slate-500 mb-1 flex items-center gap-2"><Disc size={12}/> Gray Reference (Midtones)</p>
+                          <div className="p-3 bg-slate-950 rounded border border-slate-800 grid grid-cols-3 gap-2 text-center cursor-pointer hover:border-slate-600 transition-colors"
+                               onClick={() => setState(s => ({...s, activeCalibrationTarget: 'gray'}))}
+                               style={{borderColor: state.activeCalibrationTarget === 'gray' ? '#fff' : undefined}}
+                          >
+                             <div><div className="text-[10px] text-slate-500">R</div><div className="text-xs font-mono">{state.calibrationColor?.r.toFixed(0) || '-'}</div></div>
+                             <div><div className="text-[10px] text-slate-500">G</div><div className="text-xs font-mono">{state.calibrationColor?.g.toFixed(0) || '-'}</div></div>
+                             <div><div className="text-[10px] text-slate-500">B</div><div className="text-xs font-mono">{state.calibrationColor?.b.toFixed(0) || '-'}</div></div>
+                          </div>
+                       </div>
+
+                       {/* White Point */}
+                       <div>
+                          <p className="text-xs text-slate-500 mb-1 flex items-center gap-2"><Sun size={12}/> White Point (Highlights)</p>
+                          <div className="p-3 bg-slate-950 rounded border border-slate-800 grid grid-cols-3 gap-2 text-center cursor-pointer hover:border-cyan-500 transition-colors"
+                               onClick={() => setState(s => ({...s, activeCalibrationTarget: 'white'}))}
+                               style={{borderColor: state.activeCalibrationTarget === 'white' ? '#06b6d4' : undefined}}
+                          >
+                             <div><div className="text-[10px] text-slate-500">R</div><div className="text-xs font-mono">{state.whitePointColor?.r.toFixed(0) || '-'}</div></div>
+                             <div><div className="text-[10px] text-slate-500">G</div><div className="text-xs font-mono">{state.whitePointColor?.g.toFixed(0) || '-'}</div></div>
+                             <div><div className="text-[10px] text-slate-500">B</div><div className="text-xs font-mono">{state.whitePointColor?.b.toFixed(0) || '-'}</div></div>
+                          </div>
+                       </div>
+
+                       {/* Black Point */}
+                       <div>
+                          <p className="text-xs text-slate-500 mb-1 flex items-center gap-2"><Moon size={12}/> Black Point (Shadows)</p>
+                          <div className="p-3 bg-slate-950 rounded border border-slate-800 grid grid-cols-3 gap-2 text-center cursor-pointer hover:border-orange-500 transition-colors"
+                               onClick={() => setState(s => ({...s, activeCalibrationTarget: 'black'}))}
+                               style={{borderColor: state.activeCalibrationTarget === 'black' ? '#f97316' : undefined}}
+                          >
+                             <div><div className="text-[10px] text-slate-500">R</div><div className="text-xs font-mono">{state.blackPointColor?.r.toFixed(0) || '-'}</div></div>
+                             <div><div className="text-[10px] text-slate-500">G</div><div className="text-xs font-mono">{state.blackPointColor?.g.toFixed(0) || '-'}</div></div>
+                             <div><div className="text-[10px] text-slate-500">B</div><div className="text-xs font-mono">{state.blackPointColor?.b.toFixed(0) || '-'}</div></div>
+                          </div>
+                       </div>
                     </div>
-                    {!state.calibrationColor && <p className="text-xs text-slate-500 mt-2">Draw a region on the gray card.</p>}
+                    {!state.calibrationColor && !state.whitePointColor && !state.blackPointColor && <p className="text-xs text-slate-500 mt-4 italic">Tip: Setting both White and Black points enables dynamic range correction.</p>}
                   </div>
                 )}
 
