@@ -4,7 +4,7 @@ import {
   Upload, 
   Leaf, 
   Pipette, 
-  Code, 
+  FileText, // Changed from Code
   Activity, 
   RefreshCw,
   Maximize2,
@@ -18,7 +18,8 @@ import {
   Eraser,
   Plus,
   Trash2,
-  Edit2
+  Edit2,
+  Printer
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 
@@ -55,16 +56,19 @@ interface ROIGroup {
 interface AppState {
   originalImage: string | null;
   segmentationThreshold: number;
-  activeTab: 'segmentation' | 'calibration' | 'analysis' | 'code';
+  activeTab: 'segmentation' | 'calibration' | 'analysis' | 'report'; // Changed 'code' to 'report'
   isProcessing: boolean;
-  generatedCode: string;
+  
+  // Report Data
+  reportSummary: string;
+  processedImageURL: string | null;
   
   // Calibration
   calibrationColor: { r: number, g: number, b: number } | null;
-  calibrationROI: Shape | null; // New: Area-based calibration
+  calibrationROI: Shape | null;
 
   // Segmentation Editing
-  exclusionZones: Shape[]; // Areas to remove from mask
+  exclusionZones: Shape[];
 
   // Quantification
   roiGroups: ROIGroup[];
@@ -170,7 +174,8 @@ const App = () => {
     segmentationThreshold: 20,
     activeTab: 'segmentation',
     isProcessing: false,
-    generatedCode: '',
+    reportSummary: '',
+    processedImageURL: null,
     calibrationColor: null,
     calibrationROI: null,
     exclusionZones: [],
@@ -207,7 +212,9 @@ const App = () => {
         roiGroups: [], 
         activeGroupId: null,
         calibrationColor: null,
-        calibrationROI: null
+        calibrationROI: null,
+        reportSummary: '',
+        processedImageURL: null
       }));
     };
   }, [state.originalImage]);
@@ -216,7 +223,10 @@ const App = () => {
 
   // Trigger pipeline when dependencies change
   useEffect(() => {
-    runPipeline();
+    // Only run visual pipeline if we are in a visual tab
+    if (state.activeTab !== 'report') {
+      runPipeline();
+    }
   }, [
     state.segmentationThreshold, 
     state.activeTab, 
@@ -242,7 +252,7 @@ const App = () => {
     if (overlayRef.current) {
       overlayRef.current.width = canvas.width;
       overlayRef.current.height = canvas.height;
-      drawOverlay();
+      // We draw overlay separately
     }
 
     ctx.drawImage(img, 0, 0);
@@ -254,7 +264,6 @@ const App = () => {
       const height = canvas.height;
 
       // Optimization: Pre-calculate bounding boxes for shapes
-      // This massively speeds up the pixel loop for Lassos
       const optimizedGroups = state.roiGroups.map(g => ({
         ...g,
         optimizedShapes: g.shapes.map(s => ({ shape: s, bbox: getBoundingBox(s) }))
@@ -308,48 +317,57 @@ const App = () => {
           }
         }
 
-        // 4. Quantification (Analysis Tab)
-        if (isPlant && state.activeTab === 'analysis') {
-          const ngrdi = (g + r) === 0 ? 0 : (g - r) / (g + r);
-          const maci = g === 0 ? 0 : r / g;
+        // 4. Quantification / Visualization
+        // Always calculate stats if isPlant, but visual depends on tab
+        const ngrdi = (g + r) === 0 ? 0 : (g - r) / (g + r);
+        const maci = g === 0 ? 0 : r / g;
 
-          // Check which group this pixel belongs to
-          let inGroup = false;
-          if (optimizedGroups.length > 0) {
-            for (let gIdx = 0; gIdx < optimizedGroups.length; gIdx++) {
-              const group = optimizedGroups[gIdx];
-              let inThisGroup = false;
-              
-              for (const { shape, bbox } of group.optimizedShapes) {
-                if (x >= bbox.minX && x <= bbox.maxX && y >= bbox.minY && y <= bbox.maxY) {
-                    if (isPointInShape(x, y, shape)) {
-                       inThisGroup = true;
-                       break;
-                    }
+        let inGroup = false;
+        if (isPlant) {
+           if (optimizedGroups.length > 0) {
+              for (let gIdx = 0; gIdx < optimizedGroups.length; gIdx++) {
+                const group = optimizedGroups[gIdx];
+                let inThisGroup = false;
+                
+                for (const { shape, bbox } of group.optimizedShapes) {
+                  if (x >= bbox.minX && x <= bbox.maxX && y >= bbox.minY && y <= bbox.maxY) {
+                      if (isPointInShape(x, y, shape)) {
+                         inThisGroup = true;
+                         break;
+                      }
+                  }
+                }
+                
+                if (inThisGroup) {
+                  inGroup = true;
+                  groupStats[gIdx].stats.pixelCount++;
+                  groupStats[gIdx].stats.sumNGRDI += ngrdi;
+                  groupStats[gIdx].stats.sumMACI += maci;
+                  groupStats[gIdx].stats.sumR += r;
+                  groupStats[gIdx].stats.sumG += g;
+                  groupStats[gIdx].stats.sumB += b;
                 }
               }
-              
-              if (inThisGroup) {
-                inGroup = true;
-                groupStats[gIdx].stats.pixelCount++;
-                groupStats[gIdx].stats.sumNGRDI += ngrdi;
-                groupStats[gIdx].stats.sumMACI += maci;
-                groupStats[gIdx].stats.sumR += r;
-                groupStats[gIdx].stats.sumG += g;
-                groupStats[gIdx].stats.sumB += b;
-              }
-            }
-          }
+           }
+        }
 
-          if (inGroup) {
-            // Keep original color
-            data[i] = r; data[i+1] = g; data[i+2] = b;
-          } else {
-            // Dim if not in any active ROI
-            const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-            data[i] = data[i+1] = data[i+2] = gray * 0.2; 
-          }
-
+        // Rendering Logic
+        if (state.activeTab === 'analysis' || state.activeTab === 'report') {
+             // For Analysis/Report, we show the "Result" view
+             if (isPlant) {
+                if (inGroup || state.roiGroups.length === 0) {
+                   // Keep original if in group or no groups defined
+                   data[i] = r; data[i+1] = g; data[i+2] = b;
+                } else {
+                   // Plant but not in ROI
+                   const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+                   data[i] = data[i+1] = data[i+2] = gray * 0.5;
+                }
+             } else {
+                // Background
+                const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+                data[i] = data[i+1] = data[i+2] = gray * 0.2; 
+             }
         } else if (state.activeTab === 'segmentation') {
            if (isPlant) {
              data[i] = 0; data[i+1] = 255; data[i+2] = 0; 
@@ -367,22 +385,15 @@ const App = () => {
         const count = g.stats.pixelCount || 1;
         const meanMACI = g.stats.sumMACI / count;
         const meanNGRDI = g.stats.sumNGRDI / count;
-        
-        // Calculate Anthocyanin
-        const indexVal = state.regressionParams.targetIndex === 'mACI' ? meanMACI : meanNGRDI;
-        const antho = (state.regressionParams.slope * indexVal) + state.regressionParams.intercept;
+        const antho = (state.regressionParams.slope * (state.regressionParams.targetIndex === 'mACI' ? meanMACI : meanNGRDI)) + state.regressionParams.intercept;
 
         return {
           ...g,
-          stats: {
-            ...g.stats,
-            meanMACI,
-            meanNGRDI,
-            anthocyanin: antho
-          }
+          stats: { ...g.stats, meanMACI, meanNGRDI, anthocyanin: antho }
         };
       });
 
+      // Avoid infinite loop by comparing stringified stats
       const currentStatsStr = JSON.stringify(state.roiGroups.map(g => g.stats));
       const newStatsStr = JSON.stringify(finalGroups.map(g => g.stats));
       
@@ -393,6 +404,10 @@ const App = () => {
       }
 
       ctx.putImageData(imageData, 0, 0);
+      
+      // Update Overlay after canvas draw
+      drawOverlay();
+
     } catch (e) {
       console.error(e);
     }
@@ -435,24 +450,20 @@ const App = () => {
       }
     };
 
-    // 1. Draw Exclusion Zones (Red)
-    state.exclusionZones.forEach(shape => drawShape(shape, '#ef4444', true));
-
-    // 2. Draw Calibration ROI (White/Blue)
-    if (state.calibrationROI) {
-      drawShape(state.calibrationROI, '#ffffff', false);
-    }
-
-    // 3. Draw ROI Groups
-    if (state.activeTab === 'analysis') {
-      state.roiGroups.forEach(group => {
-        group.shapes.forEach(shape => drawShape(shape, group.color, false));
-      });
-    }
-
-    // 4. Draw Active Shape
-    if (drawingShape) {
-      drawShape(drawingShape, '#fbbf24', false);
+    // Draw Based on Tab
+    if (state.activeTab !== 'report') {
+        state.exclusionZones.forEach(shape => drawShape(shape, '#ef4444', true));
+        if (state.calibrationROI && state.activeTab === 'calibration') {
+          drawShape(state.calibrationROI, '#ffffff', false);
+        }
+        if (state.activeTab === 'analysis') {
+          state.roiGroups.forEach(group => {
+            group.shapes.forEach(shape => drawShape(shape, group.color, false));
+          });
+        }
+        if (drawingShape) {
+          drawShape(drawingShape, '#fbbf24', false);
+        }
     }
   };
 
@@ -494,7 +505,6 @@ const App = () => {
         points: [...drawingShape.points, currPoint]
       });
     } else {
-      // Rect or Circle: just update the end point
       setDrawingShape({
         ...drawingShape,
         points: [drawingShape.points[0], currPoint]
@@ -506,14 +516,11 @@ const App = () => {
     if (!drawingShape) return;
 
     if (state.activeTab === 'segmentation') {
-      // Add to exclusion zones
       setState(s => ({ ...s, exclusionZones: [...s.exclusionZones, drawingShape] }));
     } else if (state.activeTab === 'calibration') {
-      // Set calibration ROI
       calculateCalibrationFromROI(drawingShape);
       setState(s => ({ ...s, calibrationROI: drawingShape, activeTool: 'none' }));
     } else if (state.activeTab === 'analysis') {
-      // Add to active ROI Group
       if (state.activeGroupId) {
         setState(s => ({
           ...s,
@@ -524,7 +531,6 @@ const App = () => {
           )
         }));
       } else {
-        // Create new group if none selected
         const newGroup: ROIGroup = {
           id: Math.random().toString(36),
           name: `Group ${state.roiGroups.length + 1}`,
@@ -538,62 +544,38 @@ const App = () => {
         }));
       }
     }
-
     setDrawingShape(null);
   };
 
-  // Helper for Calibration Area
   const calculateCalibrationFromROI = (shape: Shape) => {
      if (!loadedImageRef.current || !canvasRef.current) return;
      const ctx = canvasRef.current.getContext('2d');
      if (!ctx) return;
-     
      const bbox = getBoundingBox(shape);
      const imageData = ctx.getImageData(bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY);
      const data = imageData.data;
-     
      let rSum = 0, gSum = 0, bSum = 0, count = 0;
-
      for (let i = 0; i < data.length; i += 4) {
         const localX = (i/4) % imageData.width;
         const localY = Math.floor((i/4) / imageData.width);
         const globalX = bbox.minX + localX;
         const globalY = bbox.minY + localY;
-
         if (isPointInShape(globalX, globalY, shape)) {
-           rSum += data[i];
-           gSum += data[i+1];
-           bSum += data[i+2];
-           count++;
+           rSum += data[i]; gSum += data[i+1]; bSum += data[i+2]; count++;
         }
      }
-
      if (count > 0) {
-        setState(s => ({
-           ...s,
-           calibrationColor: {
-             r: rSum / count,
-             g: gSum / count,
-             b: bSum / count
-           }
-        }));
+        setState(s => ({ ...s, calibrationColor: { r: rSum / count, g: gSum / count, b: bSum / count } }));
      }
   };
 
-  // --- Handlers ---
-  
-  // (Existing handlers for file upload, demo load, etc. kept same)
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = (event) => {
         setState(s => ({ 
-          ...s, 
-          originalImage: event.target?.result as string,
-          calibrationColor: null,
-          roiGroups: [],
-          exclusionZones: []
+          ...s, originalImage: event.target?.result as string, calibrationColor: null, roiGroups: [], exclusionZones: [], reportSummary: '', processedImageURL: null
         }));
       };
       reader.readAsDataURL(file);
@@ -603,56 +585,61 @@ const App = () => {
   const handleDemoLoad = (url: string) => {
     const uniqueUrl = `${url}?t=${Date.now()}`;
     setState(s => ({
-      ...s,
-      originalImage: uniqueUrl,
-      calibrationColor: null,
-      isDemoMenuOpen: false,
-      roiGroups: [],
-      exclusionZones: []
+      ...s, originalImage: uniqueUrl, calibrationColor: null, isDemoMenuOpen: false, roiGroups: [], exclusionZones: [], reportSummary: '', processedImageURL: null
     }));
   };
 
-  // --- Gemini Integration ---
+  // --- Report Generation Logic ---
 
-  const generatePythonCode = async () => {
-    setState(s => ({ ...s, isProcessing: true }));
+  const handleGenerateReport = async () => {
+    // 1. Capture current canvas state as the "Analysis" image
+    if (canvasRef.current && overlayRef.current) {
+       // We need to combine main canvas and overlay for the report snapshot
+       const reportCanvas = document.createElement('canvas');
+       reportCanvas.width = canvasRef.current.width;
+       reportCanvas.height = canvasRef.current.height;
+       const rctx = reportCanvas.getContext('2d');
+       if (rctx) {
+          // Force run pipeline once to ensure "analysis" view is what we capture
+          // Actually, we are already in the render loop. If the user clicks "Generate Report"
+          // We assume they are happy with current view OR we want to show the Analysis view specifically.
+          // Let's draw what's on the main canvas (processed)
+          rctx.drawImage(canvasRef.current, 0, 0);
+          // And overlay
+          rctx.drawImage(overlayRef.current, 0, 0);
+          setState(s => ({ ...s, processedImageURL: reportCanvas.toDataURL('image/png') }));
+       }
+    }
+
+    // 2. Switch Tab
+    setState(s => ({ ...s, activeTab: 'report', isProcessing: true }));
+
+    // 3. Generate Text with Gemini
     try {
       const ai = new GeminiClient(); 
-      const code = await ai.generateSegmentationCode();
-      setState(s => ({ ...s, generatedCode: code, isProcessing: false }));
+      const summary = await ai.generateReportSummary(state.roiGroups, state.regressionParams);
+      setState(s => ({ ...s, reportSummary: summary, isProcessing: false }));
     } catch (error) {
       console.error(error);
-      setState(s => ({ ...s, isProcessing: false, generatedCode: "# Error generating code. Please check API Key." }));
+      setState(s => ({ ...s, isProcessing: false, reportSummary: "Error generating summary. Please check API Key." }));
     }
   };
 
-  useEffect(() => {
-    drawOverlay();
-  }, [state.activeTab, state.exclusionZones, state.roiGroups, state.calibrationROI, drawingShape]);
+  // --- Components Helpers ---
 
-  // --- Render Chart Component Helper ---
-  const BarChartSection = ({ title, dataKey, formatFn, colorFn }: any) => (
+  const BarChartSection = ({ title, dataKey, formatFn }: any) => (
     <div className="mb-6">
        <p className="text-[10px] text-slate-400 uppercase tracking-wider mb-2">{title}</p>
        <div className="space-y-2">
          {state.roiGroups.map(g => {
            const val = (g.stats as any)?.[dataKey] || 0;
-           // Find max for scaling
            const maxVal = Math.max(...state.roiGroups.map(gr => (gr.stats as any)?.[dataKey] || 0), 0.1); 
-           // Normalize for negative values in NGRDI (-1 to 1)
-           // For simplicity in bar chart, we'll map 0-1 relative to max magnitude if positive, 
-           // but NGRDI can be negative. Let's assume absolute magnitude for bar length or simple 0-scale.
-           // Simplified: 0 to Max positive.
            const pct = Math.max(0, Math.min(100, (val / maxVal) * 100));
-           
            return (
              <div key={g.id} className="flex items-center gap-2 text-xs">
                <span className="w-16 truncate text-slate-500">{g.name}</span>
                <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden relative">
-                 <div 
-                   className="h-full rounded-full transition-all duration-500" 
-                   style={{ width: `${pct}%`, backgroundColor: g.color }}
-                 ></div>
+                 <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: g.color }}></div>
                </div>
                <span className="w-12 text-right font-mono text-slate-300">{formatFn(val)}</span>
              </div>
@@ -663,9 +650,9 @@ const App = () => {
   );
 
   return (
-    <div className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden">
+    <div className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden font-sans">
       {/* Sidebar */}
-      <aside className="w-64 border-r border-slate-800 bg-slate-900 flex flex-col">
+      <aside className="w-64 border-r border-slate-800 bg-slate-900 flex flex-col print:hidden">
         <div className="p-6 border-b border-slate-800">
           <h1 className="flex items-center gap-2 font-bold text-lg text-emerald-400">
             <Leaf className="w-6 h-6" />
@@ -693,97 +680,170 @@ const App = () => {
             icon={<BarChart3 size={18} />}
             label="Quantification"
           />
-          <NavButton 
-            active={state.activeTab === 'code'} 
-            onClick={() => setState(s => ({ ...s, activeTab: 'code' }))}
-            icon={<Code size={18} />}
-            label="Generate Logic"
-          />
+          <div className="pt-4 mt-4 border-t border-slate-800">
+             <button 
+                onClick={handleGenerateReport}
+                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${state.activeTab === 'report' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
+              >
+                <FileText size={18} />
+                Generate Report
+              </button>
+          </div>
         </nav>
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col relative">
-        <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 backdrop-blur z-20">
-          <div className="flex items-center gap-4">
-            <h2 className="font-medium text-slate-200">
-              {state.activeTab === 'segmentation' && 'ExG Vegetation Segmentation'}
-              {state.activeTab === 'calibration' && 'Color Reference Calibration'}
-              {state.activeTab === 'analysis' && 'ROI Quantification'}
-              {state.activeTab === 'code' && 'Pipeline Generator'}
-            </h2>
+      <main className="flex-1 flex flex-col relative overflow-hidden">
+        {state.activeTab !== 'report' && (
+          <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 backdrop-blur z-20">
+            <div className="flex items-center gap-4">
+              <h2 className="font-medium text-slate-200">
+                {state.activeTab === 'segmentation' && 'ExG Vegetation Segmentation'}
+                {state.activeTab === 'calibration' && 'Color Reference Calibration'}
+                {state.activeTab === 'analysis' && 'ROI Quantification'}
+              </h2>
 
-            {/* Toolbar for Canvas Modes */}
-            {state.activeTab !== 'code' && state.activeTab !== 'calibration' && (
-               <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-8">
-                 <button 
-                   onClick={() => setState(s => ({...s, activeTool: 'rect'}))}
-                   className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                   title="Rectangle Tool"
-                 ><Square size={16} /></button>
-                 <button 
-                   onClick={() => setState(s => ({...s, activeTool: 'circle'}))}
-                   className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                   title="Circle Tool"
-                 ><CircleIcon size={16} /></button>
-                 <button 
-                   onClick={() => setState(s => ({...s, activeTool: 'lasso'}))}
-                   className={`p-2 rounded ${state.activeTool === 'lasso' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                   title="Lasso Tool"
-                 ><Lasso size={16} /></button>
-               </div>
-            )}
-             {state.activeTab === 'calibration' && (
-               <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-8">
-                 <span className="text-xs px-2 text-slate-500">ROI:</span>
-                 <button 
-                   onClick={() => setState(s => ({...s, activeTool: 'rect'}))}
-                   className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                 ><Square size={16} /></button>
-                 <button 
-                   onClick={() => setState(s => ({...s, activeTool: 'circle'}))}
-                   className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                 ><CircleIcon size={16} /></button>
-               </div>
-            )}
-          </div>
-          
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <button 
-                onClick={() => setState(s => ({ ...s, isDemoMenuOpen: !s.isDemoMenuOpen }))}
-                className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-md text-sm font-medium transition-colors border border-slate-700"
-              >
-                <Globe size={16} /> Load Demo <ChevronDown size={14} />
-              </button>
-              
-              {state.isDemoMenuOpen && (
-                <div className="absolute top-full right-0 mt-2 w-56 bg-slate-900 border border-slate-700 rounded-lg shadow-xl overflow-hidden z-50">
-                  {DEMO_IMAGES.map((img, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => handleDemoLoad(img.url)}
-                      className="w-full text-left px-4 py-3 text-sm text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
-                    >
-                      {img.label}
-                    </button>
-                  ))}
+              {(state.activeTab === 'segmentation' || state.activeTab === 'analysis') && (
+                <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-8">
+                  <button onClick={() => setState(s => ({...s, activeTool: 'rect'}))} className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><Square size={16} /></button>
+                  <button onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><CircleIcon size={16} /></button>
+                  <button onClick={() => setState(s => ({...s, activeTool: 'lasso'}))} className={`p-2 rounded ${state.activeTool === 'lasso' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><Lasso size={16} /></button>
+                </div>
+              )}
+
+              {state.activeTab === 'calibration' && (
+                <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-8">
+                   <span className="text-xs text-slate-500 px-2">Ref Region:</span>
+                   <button onClick={() => setState(s => ({...s, activeTool: 'rect'}))} className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Rectangle Region"><Square size={16} /></button>
+                   <button onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Circle Region"><CircleIcon size={16} /></button>
                 </div>
               )}
             </div>
+            
+            <div className="flex items-center gap-3">
+              <div className="relative">
+                <button onClick={() => setState(s => ({ ...s, isDemoMenuOpen: !s.isDemoMenuOpen }))} className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-md text-sm font-medium transition-colors border border-slate-700"><Globe size={16} /> Load Demo <ChevronDown size={14} /></button>
+                {state.isDemoMenuOpen && (
+                  <div className="absolute top-full right-0 mt-2 w-56 bg-slate-900 border border-slate-700 rounded-lg shadow-xl overflow-hidden z-50">
+                    {DEMO_IMAGES.map((img, idx) => (
+                      <button key={idx} onClick={() => handleDemoLoad(img.url)} className="w-full text-left px-4 py-3 text-sm text-slate-300 hover:bg-slate-800 hover:text-white transition-colors">{img.label}</button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-md text-sm font-medium"><Upload size={16} /> Upload</button>
+              <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileUpload} />
+            </div>
+          </header>
+        )}
 
-            <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-md text-sm font-medium">
-              <Upload size={16} /> Upload
-            </button>
-            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileUpload} />
+        {/* --- View: Report --- */}
+        {state.activeTab === 'report' && (
+          <div className="flex-1 overflow-auto bg-slate-200 p-8 text-black">
+             <div className="max-w-4xl mx-auto bg-white shadow-2xl min-h-[29.7cm] p-12">
+                {/* Header */}
+                <div className="border-b-2 border-black pb-6 mb-8 flex justify-between items-end">
+                   <div>
+                      <h1 className="text-3xl font-bold font-serif mb-2">Phenotypic Analysis Report</h1>
+                      <p className="text-sm text-gray-600 font-serif">Generated via BioPheno | {new Date().toLocaleDateString()}</p>
+                   </div>
+                   <button onClick={() => window.print()} className="print:hidden flex items-center gap-2 px-4 py-2 bg-slate-900 text-white rounded hover:bg-slate-700 text-sm">
+                      <Printer size={16}/> Print PDF
+                   </button>
+                </div>
+
+                {/* 1. Methodology */}
+                <section className="mb-8">
+                   <h2 className="text-xl font-bold font-serif mb-4 border-b border-gray-300 pb-1">1. Methodology</h2>
+                   <p className="text-sm leading-relaxed text-justify mb-4">
+                      <strong>Software & Algorithms:</strong> Image analysis was performed using the BioPheno software suite. 
+                      Vegetation segmentation utilized the Excess Green Index (ExG = 2G - R - B) with a calculated threshold of 
+                      <span className="font-mono bg-gray-100 px-1 mx-1 rounded">{state.segmentationThreshold}</span>. 
+                      Excluded regions were manually defined to remove background artifacts.
+                   </p>
+                   <p className="text-sm leading-relaxed text-justify mb-4">
+                      <strong>Quantification Models:</strong> Biological indices were calculated for defined Regions of Interest (ROI).
+                      Normalized Green-Red Difference Index (NGRDI) and modified Anthocyanin Content Index (mACI) were computed per pixel.
+                      Total anthocyanin content was estimated using a linear regression model 
+                      (<em>y = {state.regressionParams.slope}x + {state.regressionParams.intercept}</em>) 
+                      based on the {state.regressionParams.targetIndex} index, following protocols by Kim & van Iersel (2023).
+                   </p>
+                   {state.calibrationColor && (
+                      <p className="text-sm leading-relaxed text-justify">
+                         <strong>Color Calibration:</strong> RGB values were normalized against a neutral gray reference 
+                         (R:{state.calibrationColor.r.toFixed(0)} G:{state.calibrationColor.g.toFixed(0)} B:{state.calibrationColor.b.toFixed(0)}) 
+                         to ensure consistent lighting interpretation.
+                      </p>
+                   )}
+                </section>
+
+                {/* 2. Visual Analysis (Montage) */}
+                <section className="mb-8 break-inside-avoid">
+                   <h2 className="text-xl font-bold font-serif mb-4 border-b border-gray-300 pb-1">2. Visual Analysis</h2>
+                   <div className="grid grid-cols-2 gap-4 mb-2">
+                      <div className="border border-gray-200 p-1">
+                         <img src={state.originalImage || ''} className="w-full h-auto object-contain" alt="Original" />
+                         <p className="text-center text-xs font-serif mt-2 italic">Figure 1a. Original Specimen</p>
+                      </div>
+                      <div className="border border-gray-200 p-1">
+                         {state.processedImageURL && <img src={state.processedImageURL} className="w-full h-auto object-contain" alt="Processed" />}
+                         <p className="text-center text-xs font-serif mt-2 italic">Figure 1b. Segmented ROI Overlay</p>
+                      </div>
+                   </div>
+                </section>
+
+                {/* 3. Quantitative Results */}
+                <section className="mb-8">
+                   <h2 className="text-xl font-bold font-serif mb-4 border-b border-gray-300 pb-1">3. Quantitative Results</h2>
+                   <div className="overflow-x-auto">
+                      <table className="w-full text-sm border-collapse border border-gray-300">
+                         <thead className="bg-gray-100 font-serif">
+                            <tr>
+                               <th className="border border-gray-300 px-3 py-2 text-left">Group ID</th>
+                               <th className="border border-gray-300 px-3 py-2 text-right">Pixel Count</th>
+                               <th className="border border-gray-300 px-3 py-2 text-right">mACI (Mean)</th>
+                               <th className="border border-gray-300 px-3 py-2 text-right">NGRDI (Mean)</th>
+                               <th className="border border-gray-300 px-3 py-2 text-right bg-slate-50">Est. Anthocyanin (µg/cm²)</th>
+                            </tr>
+                         </thead>
+                         <tbody>
+                            {state.roiGroups.map(g => (
+                               <tr key={g.id}>
+                                  <td className="border border-gray-300 px-3 py-2 font-medium">{g.name}</td>
+                                  <td className="border border-gray-300 px-3 py-2 text-right font-mono">{g.stats?.pixelCount}</td>
+                                  <td className="border border-gray-300 px-3 py-2 text-right font-mono">{g.stats?.meanMACI.toFixed(3)}</td>
+                                  <td className="border border-gray-300 px-3 py-2 text-right font-mono">{g.stats?.meanNGRDI.toFixed(3)}</td>
+                                  <td className="border border-gray-300 px-3 py-2 text-right font-mono font-bold bg-slate-50">{g.stats?.anthocyanin.toFixed(2)}</td>
+                               </tr>
+                            ))}
+                         </tbody>
+                      </table>
+                   </div>
+                </section>
+
+                {/* 4. Results & Discussion (AI) */}
+                <section className="mb-8">
+                   <h2 className="text-xl font-bold font-serif mb-4 border-b border-gray-300 pb-1">4. Results & Discussion</h2>
+                   {state.isProcessing ? (
+                      <div className="flex items-center gap-2 text-slate-500 italic p-8 justify-center bg-gray-50 border border-dashed border-gray-300 rounded">
+                         <RefreshCw className="animate-spin" size={18} /> Generating scientific summary...
+                      </div>
+                   ) : (
+                      <div className="text-sm leading-loose text-justify font-serif">
+                         {state.reportSummary.split('\n').map((para, i) => (
+                            <p key={i} className="mb-4">{para}</p>
+                         ))}
+                      </div>
+                   )}
+                </section>
+
+             </div>
           </div>
-        </header>
-        
-        {state.isDemoMenuOpen && <div className="fixed inset-0 z-10" onClick={() => setState(s => ({ ...s, isDemoMenuOpen: false }))}></div>}
+        )}
 
-        <div className="flex-1 overflow-auto p-6 bg-slate-950 z-0">
-          {(state.activeTab !== 'code') && (
-            <div className="h-full flex gap-6 min-h-0">
+        {/* --- View: Main Canvas (Hidden when Report Active) --- */}
+        <div className={`flex-1 overflow-auto p-6 bg-slate-950 z-0 ${state.activeTab === 'report' ? 'hidden' : 'block'}`}>
+          <div className="h-full flex gap-6 min-h-0">
               
               {/* Left: Canvas Area */}
               <div className="flex-1 flex flex-col gap-6">
@@ -914,26 +974,11 @@ const App = () => {
                     {state.roiGroups.length > 0 && (
                       <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
                          <h3 className="font-medium text-sm text-slate-200 mb-4">Comparative Analysis</h3>
-                         
-                         <BarChartSection 
-                           title="Est. Anthocyanin (µg/cm²)" 
-                           dataKey="anthocyanin" 
-                           formatFn={(v: number) => v.toFixed(2)} 
-                         />
-
+                         <BarChartSection title="Est. Anthocyanin (µg/cm²)" dataKey="anthocyanin" formatFn={(v: number) => v.toFixed(2)} />
                          <div className="grid grid-cols-1 gap-6 pt-4 border-t border-slate-800">
-                            <BarChartSection 
-                              title="mACI Index (Red/Green)" 
-                              dataKey="meanMACI" 
-                              formatFn={(v: number) => v.toFixed(3)} 
-                            />
-                            <BarChartSection 
-                              title="NGRDI Index (Norm Diff)" 
-                              dataKey="meanNGRDI" 
-                              formatFn={(v: number) => v.toFixed(3)} 
-                            />
+                            <BarChartSection title="mACI Index (Red/Green)" dataKey="meanMACI" formatFn={(v: number) => v.toFixed(3)} />
+                            <BarChartSection title="NGRDI Index (Norm Diff)" dataKey="meanNGRDI" formatFn={(v: number) => v.toFixed(3)} />
                          </div>
-
                       </div>
                     )}
                     
@@ -955,32 +1000,13 @@ const App = () => {
                            />
                         </div>
                     </div>
-
                   </div>
                 )}
               </div>
             </div>
-          )}
+          </div>
+        )}
 
-          {state.activeTab === 'code' && (
-             <div className="max-w-4xl mx-auto">
-               <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-6">
-                 <button 
-                  onClick={generatePythonCode}
-                  disabled={state.isProcessing}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-sm font-medium flex items-center gap-2 disabled:opacity-50"
-                 >
-                   {state.isProcessing ? <RefreshCw className="animate-spin" size={16}/> : <Code size={16} />}
-                   Generate Python Script
-                 </button>
-               </div>
-               <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 overflow-auto">
-                 <pre className="text-xs font-mono text-indigo-300 whitespace-pre-wrap">{state.generatedCode || "Click generate..."}</pre>
-               </div>
-             </div>
-          )}
-
-        </div>
       </main>
     </div>
   );
@@ -997,13 +1023,37 @@ const NavButton = ({ active, onClick, icon, label }: { active: boolean, onClick:
 class GeminiClient {
   private ai: GoogleGenAI;
   constructor() { this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY }); }
-  async generateSegmentationCode() {
+  
+  async generateReportSummary(groups: ROIGroup[], regression: any) {
     const model = this.ai.models;
-    const prompt = `As a Bioinformatics Software Engineer, generate a Python script...`; // (Truncated for brevity in this response logic block)
+    const dataSummary = groups.map(g => 
+       `Group: ${g.name}, mACI: ${g.stats?.meanMACI.toFixed(3)}, NGRDI: ${g.stats?.meanNGRDI.toFixed(3)}, Anthocyanin: ${g.stats?.anthocyanin.toFixed(2)}`
+    ).join('; ');
+
+    const prompt = `
+      You are a Bioinformatics Scientist writing the 'Results and Discussion' section of a research paper.
+      
+      Study Context: 
+      - Lettuce phenotyping using RGB imagery.
+      - Segmentation via Excess Green Index (ExG).
+      - Quantified mACI (Modified Anthocyanin Content Index) and NGRDI (Normalized Green-Red Difference Index).
+      - Estimated Anthocyanin using linear model: y = ${regression.slope}x + ${regression.intercept} (Target: ${regression.targetIndex}).
+
+      Data: ${dataSummary}
+
+      Task:
+      Write a formal, scientific paragraph (approx 150-200 words) summarizing these results. 
+      Compare the groups if multiple exist. Discuss biological implications of the indices (e.g., higher NGRDI typically indicates more green biomass/vigor, higher mACI relates to stress/anthocyanin).
+      Do not use markdown formatting like bold/italics, just plain text paragraphs.
+    `;
+    
     try {
       const response = await model.generateContent({ model: 'gemini-3-flash-preview', contents: prompt });
       return response.text;
-    } catch (e) { throw e; }
+    } catch (e) {
+      console.error(e);
+      return "Error generating summary.";
+    }
   }
 }
 
