@@ -4,7 +4,7 @@ import {
   Upload, 
   Leaf, 
   Pipette, 
-  FileText, // Changed from Code
+  FileText,
   Activity, 
   RefreshCw,
   Maximize2,
@@ -19,20 +19,30 @@ import {
   Plus,
   Trash2,
   Edit2,
-  Printer
+  Printer,
+  ChevronLeft,
+  ChevronRight,
+  Github,
+  Save,
+  CheckCircle,
+  AlertCircle,
+  Wand2,
+  Layers // Added Layers import
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
+import JSZip from 'jszip';
 
 // --- Types ---
 
 type ToolType = 'none' | 'rect' | 'circle' | 'lasso';
+type VisualizationMode = 'rgb' | 'ngrdi' | 'maci';
 
 interface Point { x: number; y: number; }
 
 interface Shape {
   id: string;
   type: 'rect' | 'circle' | 'lasso';
-  points: Point[]; // For rect: [start, end], Circle: [center, edge], Lasso: [p1, p2, ...]
+  points: Point[]; 
 }
 
 interface ROIGroup {
@@ -53,10 +63,19 @@ interface ROIGroup {
   };
 }
 
+interface ImageAsset {
+  id: string;
+  name: string;
+  url: string;
+}
+
 interface AppState {
-  originalImage: string | null;
+  gallery: ImageAsset[];
+  activeImageIndex: number;
+  
   segmentationThreshold: number;
-  activeTab: 'segmentation' | 'calibration' | 'analysis' | 'report'; // Changed 'code' to 'report'
+  activeTab: 'segmentation' | 'calibration' | 'analysis' | 'report';
+  visualizationMode: VisualizationMode;
   isProcessing: boolean;
   
   // Report Data
@@ -76,6 +95,7 @@ interface AppState {
 
   // UI State
   isDemoMenuOpen: boolean;
+  isGithubModalOpen: boolean;
   activeTool: ToolType;
   
   // Regression
@@ -90,7 +110,7 @@ interface AppState {
 
 const DEMO_IMAGES = [
   { 
-    label: 'Early Growth (Day 4)', 
+    label: 'test.JPG (Early Growth)', 
     url: 'https://raw.githubusercontent.com/ISU-Research/Hydra1-Orbital-Greenhouse/master/Raw%20images/2018-05-27%2010-00-01.jpg' 
   },
   { 
@@ -170,9 +190,11 @@ const getBoundingBox = (shape: Shape) => {
 
 const App = () => {
   const [state, setState] = useState<AppState>({
-    originalImage: null,
+    gallery: [],
+    activeImageIndex: 0,
     segmentationThreshold: 20,
     activeTab: 'segmentation',
+    visualizationMode: 'rgb',
     isProcessing: false,
     reportSummary: '',
     processedImageURL: null,
@@ -182,6 +204,7 @@ const App = () => {
     roiGroups: [],
     activeGroupId: null,
     isDemoMenuOpen: false,
+    isGithubModalOpen: false,
     activeTool: 'none',
     regressionParams: {
       slope: 1.5,
@@ -195,17 +218,31 @@ const App = () => {
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadedImageRef = useRef<HTMLImageElement | null>(null);
+  const [githubConfig, setGithubConfig] = useState({ token: '', owner: '', repo: '', path: 'biopheno-results' });
+  const [githubStatus, setGithubStatus] = useState<'idle' | 'uploading' | 'success' | 'error'>('idle');
+
+  // --- Initial Load ---
+  useEffect(() => {
+    // Load default test.JPG (using demo url) on start
+    handleDemoLoad(DEMO_IMAGES[0].url, 'test.JPG');
+  }, []);
 
   // --- Image Loading ---
 
+  const currentImageUrl = useMemo(() => {
+    return state.gallery[state.activeImageIndex]?.url || null;
+  }, [state.gallery, state.activeImageIndex]);
+
   useEffect(() => {
-    if (!state.originalImage) return;
+    if (!currentImageUrl) return;
     const img = new Image();
-    if (!state.originalImage.startsWith('data:')) img.crossOrigin = "Anonymous";
-    img.src = state.originalImage;
+    if (!currentImageUrl.startsWith('data:')) img.crossOrigin = "Anonymous";
+    img.src = currentImageUrl;
     img.onload = () => {
       loadedImageRef.current = img;
-      // Reset ROIs on new image
+      // Reset ROIs on new image load to avoid mismatch
+      // In a real app we might want to preserve ROIs if images are aligned time-series
+      // For now we reset for safety.
       setState(s => ({ 
         ...s, 
         exclusionZones: [], 
@@ -217,23 +254,23 @@ const App = () => {
         processedImageURL: null
       }));
     };
-  }, [state.originalImage]);
+  }, [currentImageUrl]);
 
   // --- Pipeline & Rendering ---
 
-  // Trigger pipeline when dependencies change
   useEffect(() => {
-    // Only run visual pipeline if we are in a visual tab
     if (state.activeTab !== 'report') {
       runPipeline();
     }
   }, [
     state.segmentationThreshold, 
     state.activeTab, 
+    state.visualizationMode,
     state.calibrationColor, 
     state.exclusionZones, 
     state.roiGroups,
-    loadedImageRef.current
+    loadedImageRef.current,
+    state.regressionParams // Re-run pipeline if params change to update stats immediately
   ]);
 
   const runPipeline = () => {
@@ -244,15 +281,12 @@ const App = () => {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
-    // Set dimensions
     if (canvas.width !== img.width) canvas.width = img.width;
     if (canvas.height !== img.height) canvas.height = img.height;
     
-    // Sync Overlay
     if (overlayRef.current) {
       overlayRef.current.width = canvas.width;
       overlayRef.current.height = canvas.height;
-      // We draw overlay separately
     }
 
     ctx.drawImage(img, 0, 0);
@@ -263,7 +297,6 @@ const App = () => {
       const width = canvas.width;
       const height = canvas.height;
 
-      // Optimization: Pre-calculate bounding boxes for shapes
       const optimizedGroups = state.roiGroups.map(g => ({
         ...g,
         optimizedShapes: g.shapes.map(s => ({ shape: s, bbox: getBoundingBox(s) }))
@@ -271,7 +304,6 @@ const App = () => {
 
       const optimizedExclusion = state.exclusionZones.map(s => ({ shape: s, bbox: getBoundingBox(s) }));
 
-      // Prepare Calibration
       let rScale = 1, gScale = 1, bScale = 1;
       if (state.calibrationColor) {
         rScale = 128 / (state.calibrationColor.r || 1);
@@ -279,7 +311,6 @@ const App = () => {
         bScale = 128 / (state.calibrationColor.b || 1);
       }
 
-      // Reset Stats for Groups
       const groupStats = state.roiGroups.map(g => ({
         ...g,
         stats: { pixelCount: 0, meanNGRDI: 0, meanMACI: 0, anthocyanin: 0, sumR: 0, sumG: 0, sumB: 0, sumNGRDI: 0, sumMACI: 0 }
@@ -294,18 +325,15 @@ const App = () => {
         let g = data[i + 1];
         let b = data[i + 2];
 
-        // 1. Calibration
         if (state.calibrationColor) {
           r = Math.min(255, r * rScale);
           g = Math.min(255, g * gScale);
           b = Math.min(255, b * bScale);
         }
 
-        // 2. Segmentation (ExG)
         const exg = (2 * g) - r - b;
         let isPlant = exg > state.segmentationThreshold;
 
-        // 3. Exclusion Zones (Erase)
         if (isPlant) {
           for (const { shape, bbox } of optimizedExclusion) {
              if (x >= bbox.minX && x <= bbox.maxX && y >= bbox.minY && y <= bbox.maxY) {
@@ -317,8 +345,6 @@ const App = () => {
           }
         }
 
-        // 4. Quantification / Visualization
-        // Always calculate stats if isPlant, but visual depends on tab
         const ngrdi = (g + r) === 0 ? 0 : (g - r) / (g + r);
         const maci = g === 0 ? 0 : r / g;
 
@@ -351,17 +377,39 @@ const App = () => {
            }
         }
 
-        // Rendering Logic
         if (state.activeTab === 'analysis' || state.activeTab === 'report') {
-             // For Analysis/Report, we show the "Result" view
              if (isPlant) {
-                if (inGroup || state.roiGroups.length === 0) {
-                   // Keep original if in group or no groups defined
-                   data[i] = r; data[i+1] = g; data[i+2] = b;
-                } else {
-                   // Plant but not in ROI
-                   const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-                   data[i] = data[i+1] = data[i+2] = gray * 0.5;
+                // Visualization Mode Logic
+                if (state.visualizationMode === 'rgb') {
+                    if (inGroup || state.roiGroups.length === 0) {
+                      data[i] = r; data[i+1] = g; data[i+2] = b;
+                    } else {
+                      // Dimmed if not in group
+                      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+                      data[i] = data[i+1] = data[i+2] = gray * 0.5;
+                    }
+                } else if (state.visualizationMode === 'ngrdi') {
+                    // NGRDI typically -0.2 to 0.8. Map -0.1 (low/soil/brown) to 0.5 (high/green)
+                    const val = ngrdi;
+                    const minVal = 0.0;
+                    const maxVal = 0.5;
+                    const t = Math.max(0, Math.min(1, (val - minVal) / (maxVal - minVal)));
+                    // Yellow (Low) to Deep Green (High)
+                    // (220, 220, 50) -> (0, 100, 0)
+                    data[i] = 220 * (1-t);
+                    data[i+1] = 220 * (1-t) + 100 * t; // Mixed
+                    data[i+2] = 50 * (1-t);
+                } else if (state.visualizationMode === 'maci') {
+                    // mACI typically 0.5 (green) to 1.5 (red)
+                    const val = maci;
+                    const minVal = 0.5;
+                    const maxVal = 1.5;
+                    const t = Math.max(0, Math.min(1, (val - minVal) / (maxVal - minVal)));
+                    // Green (Low Antho) to Red (High Antho)
+                    // (0, 200, 0) -> (220, 0, 50)
+                    data[i] = 220 * t;
+                    data[i+1] = 200 * (1-t);
+                    data[i+2] = 50 * t;
                 }
              } else {
                 // Background
@@ -380,7 +428,6 @@ const App = () => {
         }
       }
 
-      // Finalize Stats
       const finalGroups = groupStats.map(g => {
         const count = g.stats.pixelCount || 1;
         const meanMACI = g.stats.sumMACI / count;
@@ -393,7 +440,6 @@ const App = () => {
         };
       });
 
-      // Avoid infinite loop by comparing stringified stats
       const currentStatsStr = JSON.stringify(state.roiGroups.map(g => g.stats));
       const newStatsStr = JSON.stringify(finalGroups.map(g => g.stats));
       
@@ -404,8 +450,6 @@ const App = () => {
       }
 
       ctx.putImageData(imageData, 0, 0);
-      
-      // Update Overlay after canvas draw
       drawOverlay();
 
     } catch (e) {
@@ -450,7 +494,6 @@ const App = () => {
       }
     };
 
-    // Draw Based on Tab
     if (state.activeTab !== 'report') {
         state.exclusionZones.forEach(shape => drawShape(shape, '#ef4444', true));
         if (state.calibrationROI && state.activeTab === 'calibration') {
@@ -467,8 +510,6 @@ const App = () => {
     }
   };
 
-  // --- Interaction Handlers ---
-
   const handleMouseDown = (e: React.MouseEvent) => {
     if (state.activeTool === 'none') return;
     if (!canvasRef.current) return;
@@ -484,7 +525,7 @@ const App = () => {
     setDrawingShape({
       id: Math.random().toString(36),
       type: state.activeTool,
-      points: [startPoint, startPoint] // Init with start point
+      points: [startPoint, startPoint]
     });
   };
 
@@ -569,52 +610,94 @@ const App = () => {
      }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setState(s => ({ 
-          ...s, originalImage: event.target?.result as string, calibrationColor: null, roiGroups: [], exclusionZones: [], reportSummary: '', processedImageURL: null
-        }));
-      };
-      reader.readAsDataURL(file);
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const newImages: ImageAsset[] = [];
+    
+    // Process each file
+    for (let i = 0; i < files.length; i++) {
+       const file = files[i];
+       
+       if (file.name.endsWith('.zip')) {
+          const zip = new JSZip();
+          try {
+             const contents = await zip.loadAsync(file);
+             const imagePromises: Promise<void>[] = [];
+             
+             contents.forEach((relativePath, zipEntry) => {
+                if (!zipEntry.dir && (relativePath.match(/\.(jpg|jpeg|png)$/i))) {
+                   imagePromises.push(zipEntry.async('base64').then(b64 => {
+                      newImages.push({
+                         id: Math.random().toString(36),
+                         name: relativePath,
+                         url: `data:image/${relativePath.split('.').pop()};base64,${b64}`
+                      });
+                   }));
+                }
+             });
+             await Promise.all(imagePromises);
+          } catch (err) {
+             console.error("Error reading zip", err);
+          }
+       } else if (file.type.startsWith('image/')) {
+          const reader = new FileReader();
+          await new Promise<void>((resolve) => {
+             reader.onload = (event) => {
+                if (event.target?.result) {
+                   newImages.push({
+                      id: Math.random().toString(36),
+                      name: file.name,
+                      url: event.target.result as string
+                   });
+                }
+                resolve();
+             };
+             reader.readAsDataURL(file);
+          });
+       }
+    }
+
+    if (newImages.length > 0) {
+       setState(s => ({
+          ...s,
+          gallery: [...s.gallery, ...newImages],
+          activeImageIndex: s.gallery.length // Set to first new image
+       }));
     }
   };
 
-  const handleDemoLoad = (url: string) => {
+  const handleDemoLoad = (url: string, label: string) => {
     const uniqueUrl = `${url}?t=${Date.now()}`;
     setState(s => ({
-      ...s, originalImage: uniqueUrl, calibrationColor: null, isDemoMenuOpen: false, roiGroups: [], exclusionZones: [], reportSummary: '', processedImageURL: null
+      ...s, 
+      gallery: [{ id: 'demo-'+Date.now(), name: label, url: uniqueUrl }],
+      activeImageIndex: 0,
+      calibrationColor: null, 
+      isDemoMenuOpen: false, 
+      roiGroups: [], 
+      exclusionZones: [], 
+      reportSummary: '', 
+      processedImageURL: null
     }));
   };
 
-  // --- Report Generation Logic ---
-
   const handleGenerateReport = async () => {
-    // 1. Capture current canvas state as the "Analysis" image
     if (canvasRef.current && overlayRef.current) {
-       // We need to combine main canvas and overlay for the report snapshot
        const reportCanvas = document.createElement('canvas');
        reportCanvas.width = canvasRef.current.width;
        reportCanvas.height = canvasRef.current.height;
        const rctx = reportCanvas.getContext('2d');
        if (rctx) {
-          // Force run pipeline once to ensure "analysis" view is what we capture
-          // Actually, we are already in the render loop. If the user clicks "Generate Report"
-          // We assume they are happy with current view OR we want to show the Analysis view specifically.
-          // Let's draw what's on the main canvas (processed)
           rctx.drawImage(canvasRef.current, 0, 0);
-          // And overlay
           rctx.drawImage(overlayRef.current, 0, 0);
           setState(s => ({ ...s, processedImageURL: reportCanvas.toDataURL('image/png') }));
        }
     }
 
-    // 2. Switch Tab
     setState(s => ({ ...s, activeTab: 'report', isProcessing: true }));
 
-    // 3. Generate Text with Gemini
     try {
       const ai = new GeminiClient(); 
       const summary = await ai.generateReportSummary(state.roiGroups, state.regressionParams);
@@ -624,6 +707,129 @@ const App = () => {
       setState(s => ({ ...s, isProcessing: false, reportSummary: "Error generating summary. Please check API Key." }));
     }
   };
+
+  const handleAutoTune = () => {
+    const target = state.regressionParams.targetIndex;
+    const groups = state.roiGroups.filter(g => g.stats && g.stats.pixelCount > 0);
+    
+    // Strategy: Map observed index range to typical biological range.
+    // Kim & van Iersel (2023) show Anthocyanin ranges approx 0-60 nmol/cm2 or µg/cm2.
+    // mACI range approx 0.3 - 2.0.
+    
+    if (groups.length < 2) {
+      // Fallback to Literature Defaults (Kim & van Iersel 2023 approximate)
+      // Assuming mACI range 0.4-2.0 maps to 0-50 units
+      const defaultSlope = target === 'mACI' ? 30.5 : 150.2; 
+      const defaultIntercept = target === 'mACI' ? -10.5 : 5.2;
+      setState(s => ({
+        ...s,
+        regressionParams: { ...s.regressionParams, slope: defaultSlope, intercept: defaultIntercept }
+      }));
+      return;
+    }
+
+    // Data-Driven Calculation
+    // Find min and max index values among the groups
+    let minIndex = Infinity;
+    let maxIndex = -Infinity;
+
+    groups.forEach(g => {
+       const val = target === 'mACI' ? g.stats!.meanMACI : g.stats!.meanNGRDI;
+       if (val < minIndex) minIndex = val;
+       if (val > maxIndex) maxIndex = val;
+    });
+
+    if (maxIndex - minIndex < 0.05) {
+       // Range too small to be reliable, use default
+       const defaultSlope = target === 'mACI' ? 30.5 : 150.2;
+       const defaultIntercept = target === 'mACI' ? -10.5 : 5.2;
+       setState(s => ({
+        ...s,
+        regressionParams: { ...s.regressionParams, slope: defaultSlope, intercept: defaultIntercept }
+      }));
+      return;
+    }
+
+    // Assume Min Index = 1.0 µg/cm2 (Green)
+    // Assume Max Index = 40.0 µg/cm2 (Red) (Typical for red lettuce)
+    const targetMin = 1.0;
+    const targetMax = 40.0;
+
+    const slope = (targetMax - targetMin) / (maxIndex - minIndex);
+    const intercept = targetMin - (slope * minIndex);
+
+    setState(s => ({
+      ...s,
+      regressionParams: { ...s.regressionParams, slope: parseFloat(slope.toFixed(2)), intercept: parseFloat(intercept.toFixed(2)) }
+    }));
+  };
+
+  // --- GitHub Export Logic ---
+  
+  const uploadToGithub = async () => {
+     if (!githubConfig.token || !githubConfig.owner || !githubConfig.repo) {
+        alert("Please fill in Token, Owner, and Repo.");
+        return;
+     }
+     
+     setGithubStatus('uploading');
+     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+     const basePath = `${githubConfig.path}/${timestamp}`;
+     
+     try {
+         // Helper to upload file
+         const uploadFile = async (filename: string, contentBase64: string, message: string) => {
+            const url = `https://api.github.com/repos/${githubConfig.owner}/${githubConfig.repo}/contents/${basePath}/${filename}`;
+            const res = await fetch(url, {
+               method: 'PUT',
+               headers: {
+                  'Authorization': `token ${githubConfig.token}`,
+                  'Content-Type': 'application/json',
+               },
+               body: JSON.stringify({
+                  message: message,
+                  content: contentBase64,
+               })
+            });
+            if (!res.ok) throw new Error(await res.text());
+         };
+
+         // 1. Upload Report (Text)
+         const reportContent = btoa(`
+# BioPheno Analysis Report
+Date: ${new Date().toLocaleDateString()}
+Image: ${state.gallery[state.activeImageIndex]?.name}
+
+## Methodology
+ExG Threshold: ${state.segmentationThreshold}
+Calibration: ${JSON.stringify(state.calibrationColor)}
+
+## Results
+${state.reportSummary}
+
+## Raw Data
+${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), null, 2)}
+         `);
+         await uploadFile('report.md', reportContent, 'Add Analysis Report');
+
+         // 2. Upload Processed Image
+         if (state.processedImageURL) {
+            const base64Data = state.processedImageURL.split(',')[1];
+            await uploadFile('analyzed_image.png', base64Data, 'Add Analyzed Image');
+         }
+
+         setGithubStatus('success');
+         setTimeout(() => {
+            setGithubStatus('idle');
+            setState(s => ({...s, isGithubModalOpen: false}));
+         }, 2000);
+
+     } catch (e) {
+         console.error(e);
+         setGithubStatus('error');
+     }
+  };
+
 
   // --- Components Helpers ---
 
@@ -678,15 +884,22 @@ const App = () => {
             active={state.activeTab === 'analysis'} 
             onClick={() => setState(s => ({ ...s, activeTab: 'analysis', activeTool: 'none' }))}
             icon={<BarChart3 size={18} />}
-            label="Quantification"
+            label="Analysis & Results"
           />
-          <div className="pt-4 mt-4 border-t border-slate-800">
+          <div className="pt-4 mt-4 border-t border-slate-800 space-y-2">
              <button 
                 onClick={handleGenerateReport}
                 className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${state.activeTab === 'report' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
               >
                 <FileText size={18} />
                 Generate Report
+              </button>
+             <button 
+                onClick={() => setState(s => ({...s, isGithubModalOpen: true}))}
+                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-slate-400 hover:bg-slate-800 hover:text-slate-200`}
+              >
+                <Github size={18} />
+                Export to GitHub
               </button>
           </div>
         </nav>
@@ -697,22 +910,31 @@ const App = () => {
         {state.activeTab !== 'report' && (
           <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 backdrop-blur z-20">
             <div className="flex items-center gap-4">
-              <h2 className="font-medium text-slate-200">
-                {state.activeTab === 'segmentation' && 'ExG Vegetation Segmentation'}
-                {state.activeTab === 'calibration' && 'Color Reference Calibration'}
-                {state.activeTab === 'analysis' && 'ROI Quantification'}
+              <h2 className="font-medium text-slate-200 hidden md:block">
+                {state.activeTab === 'segmentation' && 'Vegetation Segmentation'}
+                {state.activeTab === 'calibration' && 'Color Reference'}
+                {state.activeTab === 'analysis' && 'Analysis & Results'}
               </h2>
 
+              {/* Tools */}
               {(state.activeTab === 'segmentation' || state.activeTab === 'analysis') && (
-                <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-8">
+                <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-4">
                   <button onClick={() => setState(s => ({...s, activeTool: 'rect'}))} className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><Square size={16} /></button>
                   <button onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><CircleIcon size={16} /></button>
                   <button onClick={() => setState(s => ({...s, activeTool: 'lasso'}))} className={`p-2 rounded ${state.activeTool === 'lasso' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><Lasso size={16} /></button>
                 </div>
               )}
+              
+              {state.activeTab === 'analysis' && (
+                 <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-4">
+                    <button onClick={() => setState(s => ({...s, visualizationMode: 'rgb'}))} className={`px-3 py-1 text-xs rounded transition-colors ${state.visualizationMode === 'rgb' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}>RGB</button>
+                    <button onClick={() => setState(s => ({...s, visualizationMode: 'ngrdi'}))} className={`px-3 py-1 text-xs rounded transition-colors ${state.visualizationMode === 'ngrdi' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'}`}>NGRDI</button>
+                    <button onClick={() => setState(s => ({...s, visualizationMode: 'maci'}))} className={`px-3 py-1 text-xs rounded transition-colors ${state.visualizationMode === 'maci' ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-white'}`}>mACI</button>
+                 </div>
+              )}
 
               {state.activeTab === 'calibration' && (
-                <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-8">
+                <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-4">
                    <span className="text-xs text-slate-500 px-2">Ref Region:</span>
                    <button onClick={() => setState(s => ({...s, activeTool: 'rect'}))} className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Rectangle Region"><Square size={16} /></button>
                    <button onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Circle Region"><CircleIcon size={16} /></button>
@@ -721,20 +943,78 @@ const App = () => {
             </div>
             
             <div className="flex items-center gap-3">
+              {/* Image Navigation */}
+              {state.gallery.length > 0 && (
+                 <div className="flex items-center bg-slate-800 rounded border border-slate-700 mr-2">
+                    <button 
+                      disabled={state.activeImageIndex === 0}
+                      onClick={() => setState(s => ({...s, activeImageIndex: Math.max(0, s.activeImageIndex - 1)}))}
+                      className="p-1 hover:bg-slate-700 disabled:opacity-30"
+                    ><ChevronLeft size={16}/></button>
+                    <span className="text-xs px-2 w-20 truncate text-center text-slate-400">
+                      {state.activeImageIndex + 1} / {state.gallery.length}
+                    </span>
+                    <button 
+                      disabled={state.activeImageIndex === state.gallery.length - 1}
+                      onClick={() => setState(s => ({...s, activeImageIndex: Math.min(s.gallery.length - 1, s.activeImageIndex + 1)}))}
+                      className="p-1 hover:bg-slate-700 disabled:opacity-30"
+                    ><ChevronRight size={16}/></button>
+                 </div>
+              )}
+
               <div className="relative">
                 <button onClick={() => setState(s => ({ ...s, isDemoMenuOpen: !s.isDemoMenuOpen }))} className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-md text-sm font-medium transition-colors border border-slate-700"><Globe size={16} /> Load Demo <ChevronDown size={14} /></button>
                 {state.isDemoMenuOpen && (
                   <div className="absolute top-full right-0 mt-2 w-56 bg-slate-900 border border-slate-700 rounded-lg shadow-xl overflow-hidden z-50">
                     {DEMO_IMAGES.map((img, idx) => (
-                      <button key={idx} onClick={() => handleDemoLoad(img.url)} className="w-full text-left px-4 py-3 text-sm text-slate-300 hover:bg-slate-800 hover:text-white transition-colors">{img.label}</button>
+                      <button key={idx} onClick={() => handleDemoLoad(img.url, img.label)} className="w-full text-left px-4 py-3 text-sm text-slate-300 hover:bg-slate-800 hover:text-white transition-colors">{img.label}</button>
                     ))}
                   </div>
                 )}
               </div>
               <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-md text-sm font-medium"><Upload size={16} /> Upload</button>
-              <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileUpload} />
+              <input ref={fileInputRef} type="file" multiple accept=".jpg,.jpeg,.png,.zip" className="hidden" onChange={handleFileUpload} />
             </div>
           </header>
+        )}
+
+        {/* --- Github Modal --- */}
+        {state.isGithubModalOpen && (
+           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+              <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 w-96 shadow-2xl">
+                 <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2"><Github size={20}/> Export to GitHub</h3>
+                 <div className="space-y-4">
+                    <div>
+                       <label className="text-xs text-slate-400 block mb-1">Personal Access Token</label>
+                       <input type="password" value={githubConfig.token} onChange={e => setGithubConfig(c => ({...c, token: e.target.value}))} className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm text-white focus:border-indigo-500 outline-none" placeholder="ghp_..." />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                       <div>
+                          <label className="text-xs text-slate-400 block mb-1">Owner</label>
+                          <input type="text" value={githubConfig.owner} onChange={e => setGithubConfig(c => ({...c, owner: e.target.value}))} className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm text-white" placeholder="username" />
+                       </div>
+                       <div>
+                          <label className="text-xs text-slate-400 block mb-1">Repo Name</label>
+                          <input type="text" value={githubConfig.repo} onChange={e => setGithubConfig(c => ({...c, repo: e.target.value}))} className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm text-white" placeholder="my-repo" />
+                       </div>
+                    </div>
+                    <div>
+                       <label className="text-xs text-slate-400 block mb-1">Folder Path</label>
+                       <input type="text" value={githubConfig.path} onChange={e => setGithubConfig(c => ({...c, path: e.target.value}))} className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm text-white" placeholder="results/experiment-1" />
+                    </div>
+                    
+                    {githubStatus === 'error' && <p className="text-xs text-rose-400 flex items-center gap-1"><AlertCircle size={12}/> Upload failed. Check permissions.</p>}
+                    {githubStatus === 'success' && <p className="text-xs text-emerald-400 flex items-center gap-1"><CheckCircle size={12}/> Successfully uploaded!</p>}
+                    
+                    <div className="flex gap-2 pt-2">
+                       <button onClick={() => setState(s => ({...s, isGithubModalOpen: false}))} className="flex-1 py-2 bg-slate-800 text-slate-300 rounded text-sm hover:bg-slate-700">Cancel</button>
+                       <button onClick={uploadToGithub} disabled={githubStatus === 'uploading'} className="flex-1 py-2 bg-emerald-600 text-white rounded text-sm hover:bg-emerald-500 disabled:opacity-50 flex items-center justify-center gap-2">
+                          {githubStatus === 'uploading' ? <RefreshCw className="animate-spin" size={14}/> : <Save size={14}/>} Upload
+                       </button>
+                    </div>
+                 </div>
+              </div>
+           </div>
         )}
 
         {/* --- View: Report --- */}
@@ -782,7 +1062,7 @@ const App = () => {
                    <h2 className="text-xl font-bold font-serif mb-4 border-b border-gray-300 pb-1">2. Visual Analysis</h2>
                    <div className="grid grid-cols-2 gap-4 mb-2">
                       <div className="border border-gray-200 p-1">
-                         <img src={state.originalImage || ''} className="w-full h-auto object-contain" alt="Original" />
+                         <img src={currentImageUrl || ''} className="w-full h-auto object-contain" alt="Original" />
                          <p className="text-center text-xs font-serif mt-2 italic">Figure 1a. Original Specimen</p>
                       </div>
                       <div className="border border-gray-200 p-1">
@@ -847,7 +1127,7 @@ const App = () => {
               
               {/* Left: Canvas Area */}
               <div className="flex-1 flex flex-col gap-6">
-                {!state.originalImage ? (
+                {!currentImageUrl ? (
                    <div className="flex-1 border-2 border-dashed border-slate-800 rounded-xl flex items-center justify-center text-slate-500">
                       <div className="text-center">
                         <Leaf className="w-12 h-12 mx-auto mb-4 opacity-50" />
@@ -984,7 +1264,12 @@ const App = () => {
                     
                     {/* Regression Config */}
                     <div className="bg-slate-900 rounded-xl border border-slate-800 p-4">
-                        <p className="text-[10px] text-slate-400 font-medium mb-2">Model Params (y = mx + c)</p>
+                        <div className="flex justify-between items-center mb-2">
+                           <p className="text-[10px] text-slate-400 font-medium">Model Params (y = mx + c)</p>
+                           <button onClick={handleAutoTune} className="text-[10px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
+                              <Wand2 size={10} /> Auto-Tune
+                           </button>
+                        </div>
                         <div className="grid grid-cols-2 gap-2 mb-2">
                            <input 
                               type="number" step="0.1" placeholder="Slope"
