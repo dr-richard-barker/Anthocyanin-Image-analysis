@@ -5,8 +5,6 @@ import {
   Leaf, 
   Pipette, 
   FileText,
-  Activity, 
-  RefreshCw,
   Maximize2,
   Globe,
   ChevronDown,
@@ -15,10 +13,8 @@ import {
   Square,
   Circle as CircleIcon,
   Lasso,
-  Eraser,
   Plus,
   Trash2,
-  Edit2,
   Printer,
   ChevronLeft,
   ChevronRight,
@@ -27,14 +23,15 @@ import {
   CheckCircle,
   AlertCircle,
   Wand2,
-  Layers // Added Layers import
+  MousePointer2, // Added MousePointer2
+  RefreshCw
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import JSZip from 'jszip';
 
 // --- Types ---
 
-type ToolType = 'none' | 'rect' | 'circle' | 'lasso';
+type ToolType = 'select' | 'rect' | 'circle' | 'lasso';
 type VisualizationMode = 'rgb' | 'ngrdi' | 'maci';
 
 interface Point { x: number; y: number; }
@@ -94,9 +91,9 @@ interface AppState {
   activeGroupId: string | null;
 
   // UI State
-  isDemoMenuOpen: boolean;
   isGithubModalOpen: boolean;
   activeTool: ToolType;
+  selectedShapeId: string | null; // Added selection state
   
   // Regression
   regressionParams: {
@@ -106,24 +103,24 @@ interface AppState {
   };
 }
 
+interface DragState {
+  mode: 'move' | 'resize' | 'create';
+  startPoint: Point;
+  activeHandle: string | null; // 'nw', 'ne', 'sw', 'se'
+  initialPoints: Point[]; // Snapshot of points before drag
+}
+
 // --- Constants ---
 
 const DEMO_IMAGES = [
   { 
-    label: 'test.JPG (Early Growth)', 
+    label: 'test.JPG', 
     url: 'https://raw.githubusercontent.com/ISU-Research/Hydra1-Orbital-Greenhouse/master/Raw%20images/2018-05-27%2010-00-01.jpg' 
-  },
-  { 
-    label: 'Mid Growth (Day 18)', 
-    url: 'https://raw.githubusercontent.com/ISU-Research/Hydra1-Orbital-Greenhouse/master/Raw%20images/2018-06-10%2010-00-01.jpg' 
-  },
-  { 
-    label: 'Late Growth (Day 29)', 
-    url: 'https://raw.githubusercontent.com/ISU-Research/Hydra1-Orbital-Greenhouse/master/Raw%20images/2018-06-21%2010-00-01.jpg' 
   }
 ];
 
 const COLORS = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+const HANDLE_SIZE = 8;
 
 // --- Geometry Helpers ---
 
@@ -183,7 +180,7 @@ const getBoundingBox = (shape: Shape) => {
       if (p.y > maxY) maxY = p.y;
     });
   }
-  return { minX: Math.floor(minX), maxX: Math.ceil(maxX), minY: Math.floor(minY), maxY: Math.ceil(maxY) };
+  return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
 };
 
 // --- Main Application ---
@@ -203,9 +200,9 @@ const App = () => {
     exclusionZones: [],
     roiGroups: [],
     activeGroupId: null,
-    isDemoMenuOpen: false,
     isGithubModalOpen: false,
-    activeTool: 'none',
+    activeTool: 'select',
+    selectedShapeId: null,
     regressionParams: {
       slope: 1.5,
       intercept: 0.2,
@@ -213,7 +210,8 @@ const App = () => {
     }
   });
 
-  const [drawingShape, setDrawingShape] = useState<Shape | null>(null);
+  const [dragState, setDragState] = useState<DragState | null>(null);
+  
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -223,8 +221,8 @@ const App = () => {
 
   // --- Initial Load ---
   useEffect(() => {
-    // Load default test.JPG (using demo url) on start
-    handleDemoLoad(DEMO_IMAGES[0].url, 'test.JPG');
+    // Load default image silently without button
+    handleDemoLoad(DEMO_IMAGES[0].url, DEMO_IMAGES[0].label);
   }, []);
 
   // --- Image Loading ---
@@ -240,9 +238,6 @@ const App = () => {
     img.src = currentImageUrl;
     img.onload = () => {
       loadedImageRef.current = img;
-      // Reset ROIs on new image load to avoid mismatch
-      // In a real app we might want to preserve ROIs if images are aligned time-series
-      // For now we reset for safety.
       setState(s => ({ 
         ...s, 
         exclusionZones: [], 
@@ -251,7 +246,8 @@ const App = () => {
         calibrationColor: null,
         calibrationROI: null,
         reportSummary: '',
-        processedImageURL: null
+        processedImageURL: null,
+        selectedShapeId: null
       }));
     };
   }, [currentImageUrl]);
@@ -270,7 +266,8 @@ const App = () => {
     state.exclusionZones, 
     state.roiGroups,
     loadedImageRef.current,
-    state.regressionParams // Re-run pipeline if params change to update stats immediately
+    state.regressionParams,
+    state.selectedShapeId // Re-render overlay when selection changes
   ]);
 
   const runPipeline = () => {
@@ -379,40 +376,29 @@ const App = () => {
 
         if (state.activeTab === 'analysis' || state.activeTab === 'report') {
              if (isPlant) {
-                // Visualization Mode Logic
                 if (state.visualizationMode === 'rgb') {
                     if (inGroup || state.roiGroups.length === 0) {
                       data[i] = r; data[i+1] = g; data[i+2] = b;
                     } else {
-                      // Dimmed if not in group
                       const gray = 0.299 * r + 0.587 * g + 0.114 * b;
                       data[i] = data[i+1] = data[i+2] = gray * 0.5;
                     }
                 } else if (state.visualizationMode === 'ngrdi') {
-                    // NGRDI typically -0.2 to 0.8. Map -0.1 (low/soil/brown) to 0.5 (high/green)
                     const val = ngrdi;
-                    const minVal = 0.0;
-                    const maxVal = 0.5;
+                    const minVal = 0.0, maxVal = 0.5;
                     const t = Math.max(0, Math.min(1, (val - minVal) / (maxVal - minVal)));
-                    // Yellow (Low) to Deep Green (High)
-                    // (220, 220, 50) -> (0, 100, 0)
                     data[i] = 220 * (1-t);
-                    data[i+1] = 220 * (1-t) + 100 * t; // Mixed
+                    data[i+1] = 220 * (1-t) + 100 * t;
                     data[i+2] = 50 * (1-t);
                 } else if (state.visualizationMode === 'maci') {
-                    // mACI typically 0.5 (green) to 1.5 (red)
                     const val = maci;
-                    const minVal = 0.5;
-                    const maxVal = 1.5;
+                    const minVal = 0.5, maxVal = 1.5;
                     const t = Math.max(0, Math.min(1, (val - minVal) / (maxVal - minVal)));
-                    // Green (Low Antho) to Red (High Antho)
-                    // (0, 200, 0) -> (220, 0, 50)
                     data[i] = 220 * t;
                     data[i+1] = 200 * (1-t);
                     data[i+2] = 50 * t;
                 }
              } else {
-                // Background
                 const gray = 0.299 * r + 0.587 * g + 0.114 * b;
                 data[i] = data[i+1] = data[i+2] = gray * 0.2; 
              }
@@ -440,10 +426,11 @@ const App = () => {
         };
       });
 
+      // Avoid infinite loop by only updating if stats change significantly
       const currentStatsStr = JSON.stringify(state.roiGroups.map(g => g.stats));
       const newStatsStr = JSON.stringify(finalGroups.map(g => g.stats));
       
-      if (currentStatsStr !== newStatsStr) {
+      if (currentStatsStr !== newStatsStr && !dragState) {
          setTimeout(() => {
             setState(s => ({ ...s, roiGroups: finalGroups }));
          }, 0);
@@ -465,7 +452,7 @@ const App = () => {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const drawShape = (shape: Shape, color: string, fill: boolean = false) => {
+    const drawShape = (shape: Shape, color: string, fill: boolean = false, isSelected: boolean = false) => {
       ctx.beginPath();
       if (shape.type === 'rect') {
         const w = shape.points[1].x - shape.points[0].x;
@@ -492,100 +479,261 @@ const App = () => {
         ctx.fillStyle = color + '40'; // 25% opacity
         ctx.fill();
       }
+
+      // Draw selection UI
+      if (isSelected) {
+         const bbox = getBoundingBox(shape);
+         ctx.save();
+         ctx.strokeStyle = '#38bdf8'; // light blue
+         ctx.lineWidth = 1;
+         ctx.setLineDash([4, 4]);
+         ctx.strokeRect(bbox.minX - 2, bbox.minY - 2, bbox.width + 4, bbox.height + 4);
+         ctx.restore();
+
+         // Handles
+         ctx.fillStyle = '#38bdf8';
+         const handles = [
+             {x: bbox.minX, y: bbox.minY}, // nw
+             {x: bbox.maxX, y: bbox.minY}, // ne
+             {x: bbox.minX, y: bbox.maxY}, // sw
+             {x: bbox.maxX, y: bbox.maxY}, // se
+         ];
+         handles.forEach(h => {
+             ctx.fillRect(h.x - HANDLE_SIZE/2, h.y - HANDLE_SIZE/2, HANDLE_SIZE, HANDLE_SIZE);
+         });
+      }
     };
 
     if (state.activeTab !== 'report') {
-        state.exclusionZones.forEach(shape => drawShape(shape, '#ef4444', true));
+        state.exclusionZones.forEach(shape => drawShape(shape, '#ef4444', true, shape.id === state.selectedShapeId));
         if (state.calibrationROI && state.activeTab === 'calibration') {
-          drawShape(state.calibrationROI, '#ffffff', false);
+          drawShape(state.calibrationROI, '#ffffff', false, state.calibrationROI.id === state.selectedShapeId);
         }
         if (state.activeTab === 'analysis') {
           state.roiGroups.forEach(group => {
-            group.shapes.forEach(shape => drawShape(shape, group.color, false));
+            group.shapes.forEach(shape => drawShape(shape, group.color, false, shape.id === state.selectedShapeId));
           });
         }
-        if (drawingShape) {
-          drawShape(drawingShape, '#fbbf24', false);
+        if (dragState && dragState.mode === 'create') {
+           // We'll draw the creating shape from a temp state if we had it, but currently we draw directly to exclusionZones/etc on mouse up
+           // Re-implementing a temp draw would be better, but we can reuse the `state` logic for now.
         }
     }
   };
 
+  const getShapeUnderCursor = (x: number, y: number): { shape: Shape, group?: ROIGroup } | null => {
+      // Check active tab content
+      if (state.activeTab === 'segmentation') {
+          for (const s of state.exclusionZones) {
+              if (isPointInShape(x, y, s)) return { shape: s };
+          }
+      } else if (state.activeTab === 'calibration' && state.calibrationROI) {
+          if (isPointInShape(x, y, state.calibrationROI)) return { shape: state.calibrationROI };
+      } else if (state.activeTab === 'analysis') {
+          for (const g of state.roiGroups) {
+              for (const s of g.shapes) {
+                  if (isPointInShape(x, y, s)) return { shape: s, group: g };
+              }
+          }
+      }
+      return null;
+  };
+
+  const getHandleUnderCursor = (x: number, y: number, shape: Shape): string | null => {
+      const bbox = getBoundingBox(shape);
+      const tol = HANDLE_SIZE;
+      if (Math.abs(x - bbox.minX) < tol && Math.abs(y - bbox.minY) < tol) return 'nw';
+      if (Math.abs(x - bbox.maxX) < tol && Math.abs(y - bbox.minY) < tol) return 'ne';
+      if (Math.abs(x - bbox.minX) < tol && Math.abs(y - bbox.maxY) < tol) return 'sw';
+      if (Math.abs(x - bbox.maxX) < tol && Math.abs(y - bbox.maxY) < tol) return 'se';
+      return null;
+  };
+
+  const updateShapeInState = (newShape: Shape) => {
+      if (state.activeTab === 'segmentation') {
+          setState(s => ({...s, exclusionZones: s.exclusionZones.map(sh => sh.id === newShape.id ? newShape : sh)}));
+      } else if (state.activeTab === 'calibration') {
+          setState(s => ({...s, calibrationROI: newShape}));
+      } else if (state.activeTab === 'analysis') {
+          setState(s => ({
+              ...s, 
+              roiGroups: s.roiGroups.map(g => ({
+                  ...g,
+                  shapes: g.shapes.map(sh => sh.id === newShape.id ? newShape : sh)
+              }))
+          }));
+      }
+  };
+
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (state.activeTool === 'none') return;
     if (!canvasRef.current) return;
-    
     const rect = canvasRef.current.getBoundingClientRect();
     const scaleX = canvasRef.current.width / rect.width;
     const scaleY = canvasRef.current.height / rect.height;
     const x = (e.clientX - rect.left) * scaleX;
     const y = (e.clientY - rect.top) * scaleY;
-
     const startPoint = { x, y };
 
-    setDrawingShape({
-      id: Math.random().toString(36),
-      type: state.activeTool,
-      points: [startPoint, startPoint]
-    });
+    if (state.activeTool === 'select') {
+        // 1. Check handles of currently selected shape
+        if (state.selectedShapeId) {
+            let selectedShape: Shape | null = null;
+            // Find the shape object
+            if (state.activeTab === 'segmentation') selectedShape = state.exclusionZones.find(s => s.id === state.selectedShapeId) || null;
+            else if (state.activeTab === 'calibration') selectedShape = state.calibrationROI?.id === state.selectedShapeId ? state.calibrationROI : null;
+            else if (state.activeTab === 'analysis') {
+                 state.roiGroups.forEach(g => {
+                     const f = g.shapes.find(s => s.id === state.selectedShapeId);
+                     if (f) selectedShape = f;
+                 });
+            }
+
+            if (selectedShape) {
+                const handle = getHandleUnderCursor(x, y, selectedShape);
+                if (handle) {
+                    setDragState({ mode: 'resize', startPoint, activeHandle: handle, initialPoints: JSON.parse(JSON.stringify(selectedShape.points)) });
+                    return;
+                }
+            }
+        }
+
+        // 2. Check for new selection or move
+        const hit = getShapeUnderCursor(x, y);
+        if (hit) {
+            setState(s => ({ ...s, selectedShapeId: hit.shape.id, activeGroupId: hit.group?.id || s.activeGroupId }));
+            setDragState({ mode: 'move', startPoint, activeHandle: null, initialPoints: JSON.parse(JSON.stringify(hit.shape.points)) });
+        } else {
+            setState(s => ({ ...s, selectedShapeId: null }));
+        }
+
+    } else {
+        // Creation Mode
+        const newShape: Shape = {
+            id: Math.random().toString(36),
+            type: state.activeTool,
+            points: [startPoint, startPoint]
+        };
+        
+        // Add immediately to state so we can see it drawing
+        if (state.activeTab === 'segmentation') {
+             setState(s => ({...s, exclusionZones: [...s.exclusionZones, newShape], selectedShapeId: newShape.id }));
+        } else if (state.activeTab === 'calibration') {
+             setState(s => ({...s, calibrationROI: newShape, selectedShapeId: newShape.id }));
+        } else if (state.activeTab === 'analysis') {
+             if (state.activeGroupId) {
+                 setState(s => ({
+                     ...s,
+                     roiGroups: s.roiGroups.map(g => g.id === s.activeGroupId ? {...g, shapes: [...g.shapes, newShape]} : g),
+                     selectedShapeId: newShape.id
+                 }));
+             } else {
+                 const newGroup: ROIGroup = {
+                    id: Math.random().toString(36),
+                    name: `Group ${state.roiGroups.length + 1}`,
+                    color: COLORS[state.roiGroups.length % COLORS.length],
+                    shapes: [newShape]
+                 };
+                 setState(s => ({ ...s, roiGroups: [...s.roiGroups, newGroup], activeGroupId: newGroup.id, selectedShapeId: newShape.id }));
+             }
+        }
+        setDragState({ mode: 'create', startPoint, activeHandle: null, initialPoints: [] });
+    }
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (!drawingShape) return;
-    if (!canvasRef.current) return;
-
+    if (!dragState || !canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const scaleX = canvasRef.current.width / rect.width;
     const scaleY = canvasRef.current.height / rect.height;
     const x = (e.clientX - rect.left) * scaleX;
     const y = (e.clientY - rect.top) * scaleY;
-    const currPoint = { x, y };
+    const currentPoint = { x, y };
 
-    if (drawingShape.type === 'lasso') {
-      setDrawingShape({
-        ...drawingShape,
-        points: [...drawingShape.points, currPoint]
-      });
-    } else {
-      setDrawingShape({
-        ...drawingShape,
-        points: [drawingShape.points[0], currPoint]
-      });
+    if (dragState.mode === 'create') {
+        // Update the last added shape
+        let shapeId = state.selectedShapeId;
+        if (!shapeId) return;
+
+        // Helper to find shape object
+        let shape: Shape | undefined;
+        if (state.activeTab === 'segmentation') shape = state.exclusionZones.find(s => s.id === shapeId);
+        else if (state.activeTab === 'calibration') shape = state.calibrationROI?.id === shapeId ? state.calibrationROI : undefined;
+        else if (state.activeTab === 'analysis') {
+             state.roiGroups.forEach(g => { if(!shape) shape = g.shapes.find(s => s.id === shapeId); });
+        }
+
+        if (shape) {
+            let newPoints = [...shape.points];
+            if (shape.type === 'lasso') {
+                newPoints.push(currentPoint);
+            } else {
+                newPoints[1] = currentPoint;
+            }
+            updateShapeInState({ ...shape, points: newPoints });
+        }
+
+    } else if (dragState.mode === 'move') {
+        const dx = x - dragState.startPoint.x;
+        const dy = y - dragState.startPoint.y;
+        
+        let shapeId = state.selectedShapeId;
+        // Find shape, update points
+        let shape: Shape | undefined;
+        if (state.activeTab === 'segmentation') shape = state.exclusionZones.find(s => s.id === shapeId);
+        else if (state.activeTab === 'calibration') shape = state.calibrationROI?.id === shapeId ? state.calibrationROI : undefined;
+        else if (state.activeTab === 'analysis') state.roiGroups.forEach(g => { if(!shape) shape = g.shapes.find(s => s.id === shapeId); });
+
+        if (shape) {
+             const newPoints = dragState.initialPoints.map(p => ({ x: p.x + dx, y: p.y + dy }));
+             updateShapeInState({ ...shape, points: newPoints });
+        }
+
+    } else if (dragState.mode === 'resize') {
+        let shapeId = state.selectedShapeId;
+        let shape: Shape | undefined;
+        if (state.activeTab === 'segmentation') shape = state.exclusionZones.find(s => s.id === shapeId);
+        else if (state.activeTab === 'calibration') shape = state.calibrationROI?.id === shapeId ? state.calibrationROI : undefined;
+        else if (state.activeTab === 'analysis') state.roiGroups.forEach(g => { if(!shape) shape = g.shapes.find(s => s.id === shapeId); });
+        
+        if (shape) {
+            // Logic: Calculate new BBox from handle movement, then map points
+            const initBBox = getBoundingBox({ ...shape, points: dragState.initialPoints });
+            let newMinX = initBBox.minX;
+            let newMaxX = initBBox.maxX;
+            let newMinY = initBBox.minY;
+            let newMaxY = initBBox.maxY;
+
+            const dx = x - dragState.startPoint.x;
+            const dy = y - dragState.startPoint.y;
+
+            if (dragState.activeHandle === 'nw') { newMinX += dx; newMinY += dy; }
+            if (dragState.activeHandle === 'ne') { newMaxX += dx; newMinY += dy; }
+            if (dragState.activeHandle === 'sw') { newMinX += dx; newMaxY += dy; }
+            if (dragState.activeHandle === 'se') { newMaxX += dx; newMaxY += dy; }
+
+            const scaleX = (newMaxX - newMinX) / (initBBox.maxX - initBBox.minX || 1);
+            const scaleY = (newMaxY - newMinY) / (initBBox.maxY - initBBox.minY || 1);
+
+            const newPoints = dragState.initialPoints.map(p => ({
+                x: newMinX + (p.x - initBBox.minX) * scaleX,
+                y: newMinY + (p.y - initBBox.minY) * scaleY
+            }));
+            updateShapeInState({ ...shape, points: newPoints });
+        }
     }
   };
 
   const handleMouseUp = () => {
-    if (!drawingShape) return;
-
-    if (state.activeTab === 'segmentation') {
-      setState(s => ({ ...s, exclusionZones: [...s.exclusionZones, drawingShape] }));
-    } else if (state.activeTab === 'calibration') {
-      calculateCalibrationFromROI(drawingShape);
-      setState(s => ({ ...s, calibrationROI: drawingShape, activeTool: 'none' }));
-    } else if (state.activeTab === 'analysis') {
-      if (state.activeGroupId) {
-        setState(s => ({
-          ...s,
-          roiGroups: s.roiGroups.map(g => 
-            g.id === s.activeGroupId 
-            ? { ...g, shapes: [...g.shapes, drawingShape] } 
-            : g
-          )
-        }));
-      } else {
-        const newGroup: ROIGroup = {
-          id: Math.random().toString(36),
-          name: `Group ${state.roiGroups.length + 1}`,
-          color: COLORS[state.roiGroups.length % COLORS.length],
-          shapes: [drawingShape]
-        };
-        setState(s => ({
-          ...s,
-          roiGroups: [...s.roiGroups, newGroup],
-          activeGroupId: newGroup.id
-        }));
-      }
+    if (dragState?.mode === 'create') {
+        // If created shape is tiny, maybe delete it? Skipping for now.
+        if (state.activeTab === 'calibration' && state.calibrationROI) {
+             calculateCalibrationFromROI(state.calibrationROI);
+        }
     }
-    setDrawingShape(null);
+    setDragState(null);
+    if (state.activeTool !== 'select') {
+         setState(s => ({ ...s, activeTool: 'select' })); // Reset to select tool after draw
+    }
   };
 
   const calculateCalibrationFromROI = (shape: Shape) => {
@@ -675,7 +823,6 @@ const App = () => {
       gallery: [{ id: 'demo-'+Date.now(), name: label, url: uniqueUrl }],
       activeImageIndex: 0,
       calibrationColor: null, 
-      isDemoMenuOpen: false, 
       roiGroups: [], 
       exclusionZones: [], 
       reportSummary: '', 
@@ -870,19 +1017,19 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
         <nav className="flex-1 p-4 space-y-2">
           <NavButton 
             active={state.activeTab === 'segmentation'} 
-            onClick={() => setState(s => ({ ...s, activeTab: 'segmentation', activeTool: 'none' }))}
+            onClick={() => setState(s => ({ ...s, activeTab: 'segmentation', activeTool: 'select', selectedShapeId: null }))}
             icon={<Maximize2 size={18} />}
             label="Segmentation"
           />
           <NavButton 
             active={state.activeTab === 'calibration'} 
-            onClick={() => setState(s => ({ ...s, activeTab: 'calibration', activeTool: 'none' }))}
+            onClick={() => setState(s => ({ ...s, activeTab: 'calibration', activeTool: 'select', selectedShapeId: null }))}
             icon={<Pipette size={18} />}
             label="Color Calibration"
           />
           <NavButton 
             active={state.activeTab === 'analysis'} 
-            onClick={() => setState(s => ({ ...s, activeTab: 'analysis', activeTool: 'none' }))}
+            onClick={() => setState(s => ({ ...s, activeTab: 'analysis', activeTool: 'select', selectedShapeId: null }))}
             icon={<BarChart3 size={18} />}
             label="Analysis & Results"
           />
@@ -919,6 +1066,7 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
               {/* Tools */}
               {(state.activeTab === 'segmentation' || state.activeTab === 'analysis') && (
                 <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-4">
+                  <button onClick={() => setState(s => ({...s, activeTool: 'select'}))} className={`p-2 rounded ${state.activeTool === 'select' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><MousePointer2 size={16} /></button>
                   <button onClick={() => setState(s => ({...s, activeTool: 'rect'}))} className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><Square size={16} /></button>
                   <button onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><CircleIcon size={16} /></button>
                   <button onClick={() => setState(s => ({...s, activeTool: 'lasso'}))} className={`p-2 rounded ${state.activeTool === 'lasso' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><Lasso size={16} /></button>
@@ -936,6 +1084,7 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
               {state.activeTab === 'calibration' && (
                 <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-4">
                    <span className="text-xs text-slate-500 px-2">Ref Region:</span>
+                   <button onClick={() => setState(s => ({...s, activeTool: 'select'}))} className={`p-2 rounded ${state.activeTool === 'select' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><MousePointer2 size={16} /></button>
                    <button onClick={() => setState(s => ({...s, activeTool: 'rect'}))} className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Rectangle Region"><Square size={16} /></button>
                    <button onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Circle Region"><CircleIcon size={16} /></button>
                 </div>
@@ -962,16 +1111,8 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
                  </div>
               )}
 
-              <div className="relative">
-                <button onClick={() => setState(s => ({ ...s, isDemoMenuOpen: !s.isDemoMenuOpen }))} className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-md text-sm font-medium transition-colors border border-slate-700"><Globe size={16} /> Load Demo <ChevronDown size={14} /></button>
-                {state.isDemoMenuOpen && (
-                  <div className="absolute top-full right-0 mt-2 w-56 bg-slate-900 border border-slate-700 rounded-lg shadow-xl overflow-hidden z-50">
-                    {DEMO_IMAGES.map((img, idx) => (
-                      <button key={idx} onClick={() => handleDemoLoad(img.url, img.label)} className="w-full text-left px-4 py-3 text-sm text-slate-300 hover:bg-slate-800 hover:text-white transition-colors">{img.label}</button>
-                    ))}
-                  </div>
-                )}
-              </div>
+              {/* Demo button removed */}
+
               <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-md text-sm font-medium"><Upload size={16} /> Upload</button>
               <input ref={fileInputRef} type="file" multiple accept=".jpg,.jpeg,.png,.zip" className="hidden" onChange={handleFileUpload} />
             </div>
@@ -1140,7 +1281,8 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
                       <canvas ref={canvasRef} className="block max-w-full max-h-full object-contain" />
                       <canvas 
                         ref={overlayRef} 
-                        className="absolute inset-0 w-full h-full pointer-events-auto"
+                        className={`absolute inset-0 w-full h-full pointer-events-auto ${state.activeTool === 'select' ? 'cursor-default' : 'cursor-crosshair'}`}
+                        style={{ cursor: dragState?.activeHandle ? (dragState.activeHandle === 'nw' || dragState.activeHandle === 'se' ? 'nwse-resize' : 'nesw-resize') : (state.activeTool === 'select' ? (state.selectedShapeId && getShapeUnderCursor(0,0)?.shape.id === state.selectedShapeId ? 'move' : 'default') : 'crosshair') }}
                         onMouseDown={handleMouseDown}
                         onMouseMove={handleMouseMove}
                         onMouseUp={handleMouseUp}
@@ -1151,9 +1293,9 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
                 
                 {/* Hints */}
                 <div className="text-xs text-slate-500 flex gap-4">
-                  {state.activeTab === 'segmentation' && <span>Use tools to erase background artifacts.</span>}
+                  {state.activeTab === 'segmentation' && <span>Use tools to erase background artifacts. Select to move/resize.</span>}
                   {state.activeTab === 'calibration' && <span>Draw a box/circle over a neutral gray reference card.</span>}
-                  {state.activeTab === 'analysis' && <span>Use Lasso or Rect tool to define plant groups.</span>}
+                  {state.activeTab === 'analysis' && <span>Use Lasso or Rect tool to define plant groups. Select to edit.</span>}
                 </div>
               </div>
 
@@ -1179,7 +1321,7 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
                            <div className="flex justify-between items-center mb-2">
                              <span className="text-xs text-rose-400 font-medium">Excluded Regions ({state.exclusionZones.length})</span>
                              <button 
-                               onClick={() => setState(s => ({...s, exclusionZones: []}))}
+                               onClick={() => setState(s => ({...s, exclusionZones: [], selectedShapeId: null}))}
                                className="text-[10px] text-slate-500 hover:text-rose-400"
                              >Clear All</button>
                            </div>
