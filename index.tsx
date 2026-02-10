@@ -27,14 +27,18 @@ import {
   RefreshCw,
   Sun,
   Moon,
-  Disc
+  Disc,
+  ZoomIn,
+  ZoomOut,
+  Move,
+  Minimize
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import JSZip from 'jszip';
 
 // --- Types ---
 
-type ToolType = 'select' | 'rect' | 'circle' | 'lasso';
+type ToolType = 'select' | 'rect' | 'circle' | 'lasso' | 'pan';
 type VisualizationMode = 'rgb' | 'ngrdi' | 'maci';
 
 interface Point { x: number; y: number; }
@@ -101,7 +105,11 @@ interface AppState {
   // UI State
   isGithubModalOpen: boolean;
   activeTool: ToolType;
-  selectedShapeId: string | null; // Added selection state
+  selectedShapeId: string | null;
+  
+  // Viewport
+  zoom: number;
+  pan: { x: number, y: number };
   
   // Regression
   regressionParams: {
@@ -112,10 +120,12 @@ interface AppState {
 }
 
 interface DragState {
-  mode: 'move' | 'resize' | 'create';
-  startPoint: Point;
+  mode: 'move' | 'resize' | 'create' | 'pan';
+  startPoint: Point; // Image Coordinates
+  startScreenPoint: Point; // Screen Coordinates
   activeHandle: string | null; // 'nw', 'ne', 'sw', 'se'
   initialPoints: Point[]; // Snapshot of points before drag
+  initialPan?: { x: number, y: number }; // Snapshot of pan before drag
 }
 
 // --- Constants ---
@@ -219,6 +229,11 @@ const App = () => {
     isGithubModalOpen: false,
     activeTool: 'select',
     selectedShapeId: null,
+    
+    // Viewport
+    zoom: 1,
+    pan: { x: 0, y: 0 },
+
     regressionParams: {
       slope: 1.5,
       intercept: 0.2,
@@ -228,6 +243,7 @@ const App = () => {
 
   const [dragState, setDragState] = useState<DragState | null>(null);
   
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -254,24 +270,54 @@ const App = () => {
     img.src = currentImageUrl;
     img.onload = () => {
       loadedImageRef.current = img;
-      setState(s => ({ 
-        ...s, 
-        exclusionZones: [], 
-        roiGroups: [], 
-        activeGroupId: null,
-        // Reset Calibration
-        calibrationColor: null,
-        calibrationROI: null,
-        whitePointColor: null,
-        whitePointROI: null,
-        blackPointColor: null,
-        blackPointROI: null,
-        reportSummary: '',
-        processedImageURL: null,
-        selectedShapeId: null
-      }));
+      setState(s => {
+         const nextState = { 
+            ...s, 
+            exclusionZones: [], 
+            roiGroups: [], 
+            activeGroupId: null,
+            // Reset Calibration
+            calibrationColor: null,
+            calibrationROI: null,
+            whitePointColor: null,
+            whitePointROI: null,
+            blackPointColor: null,
+            blackPointROI: null,
+            reportSummary: '',
+            processedImageURL: null,
+            selectedShapeId: null
+         };
+         // We can't synchronously calculate layout here because render hasn't happened with new image
+         // Defer fit to screen
+         setTimeout(() => fitImageToScreen(), 10);
+         return nextState;
+      });
     };
   }, [currentImageUrl]);
+
+  const fitImageToScreen = () => {
+    if (!loadedImageRef.current || !containerRef.current) return;
+    const container = containerRef.current;
+    const img = loadedImageRef.current;
+    
+    // padding 
+    const padding = 40;
+    const availW = container.clientWidth - padding;
+    const availH = container.clientHeight - padding;
+    
+    if (availW <= 0 || availH <= 0) return;
+
+    const scaleW = availW / img.width;
+    const scaleH = availH / img.height;
+    
+    const zoom = Math.min(scaleW, scaleH); // Fit entirely
+
+    // Center it
+    const newPanX = (container.clientWidth - img.width * zoom) / 2;
+    const newPanY = (container.clientHeight - img.height * zoom) / 2;
+    
+    setState(s => ({ ...s, zoom, pan: { x: newPanX, y: newPanY } }));
+  };
 
   // --- Pipeline & Rendering ---
 
@@ -290,7 +336,8 @@ const App = () => {
     state.roiGroups,
     loadedImageRef.current,
     state.regressionParams,
-    state.selectedShapeId
+    state.selectedShapeId,
+    state.zoom // Trigger redraw to update handle sizes if needed, though usually just overlay update is enough
   ]);
 
   const runPipeline = () => {
@@ -502,6 +549,9 @@ const App = () => {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // Scale handles inversely to zoom so they appear constant size
+    const currentHandleSize = HANDLE_SIZE / state.zoom;
+
     const drawShape = (shape: Shape, color: string, fill: boolean = false, isSelected: boolean = false) => {
       ctx.beginPath();
       if (shape.type === 'rect') {
@@ -522,7 +572,8 @@ const App = () => {
         ctx.closePath();
       }
       
-      ctx.lineWidth = 2;
+      // Keep line width somewhat visible but detailed
+      ctx.lineWidth = 2 / state.zoom;
       ctx.strokeStyle = color;
       ctx.stroke();
       if (fill) {
@@ -535,9 +586,10 @@ const App = () => {
          const bbox = getBoundingBox(shape);
          ctx.save();
          ctx.strokeStyle = '#38bdf8'; // light blue
-         ctx.lineWidth = 1;
-         ctx.setLineDash([4, 4]);
-         ctx.strokeRect(bbox.minX - 2, bbox.minY - 2, bbox.width + 4, bbox.height + 4);
+         ctx.lineWidth = 1 / state.zoom;
+         ctx.setLineDash([4 / state.zoom, 4 / state.zoom]);
+         const pad = 2 / state.zoom;
+         ctx.strokeRect(bbox.minX - pad, bbox.minY - pad, bbox.width + pad*2, bbox.height + pad*2);
          ctx.restore();
 
          // Handles
@@ -549,7 +601,7 @@ const App = () => {
              {x: bbox.maxX, y: bbox.maxY}, // se
          ];
          handles.forEach(h => {
-             ctx.fillRect(h.x - HANDLE_SIZE/2, h.y - HANDLE_SIZE/2, HANDLE_SIZE, HANDLE_SIZE);
+             ctx.fillRect(h.x - currentHandleSize/2, h.y - currentHandleSize/2, currentHandleSize, currentHandleSize);
          });
       }
     };
@@ -595,7 +647,7 @@ const App = () => {
 
   const getHandleUnderCursor = (x: number, y: number, shape: Shape): string | null => {
       const bbox = getBoundingBox(shape);
-      const tol = HANDLE_SIZE;
+      const tol = HANDLE_SIZE / state.zoom;
       if (Math.abs(x - bbox.minX) < tol && Math.abs(y - bbox.minY) < tol) return 'nw';
       if (Math.abs(x - bbox.maxX) < tol && Math.abs(y - bbox.minY) < tol) return 'ne';
       if (Math.abs(x - bbox.minX) < tol && Math.abs(y - bbox.maxY) < tol) return 'sw';
@@ -622,6 +674,32 @@ const App = () => {
       }
   };
 
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    if (!containerRef.current) return;
+    
+    // Zoom around mouse
+    const scaleFactor = 1.1;
+    const direction = e.deltaY > 0 ? -1 : 1;
+    const factor = direction > 0 ? scaleFactor : 1 / scaleFactor;
+    
+    let newZoom = state.zoom * factor;
+    newZoom = Math.max(0.01, Math.min(50, newZoom)); // limits
+
+    const rect = containerRef.current.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    // imgX = (screenX - panX) / zoom
+    const imgX = (mouseX - state.pan.x) / state.zoom;
+    const imgY = (mouseY - state.pan.y) / state.zoom;
+
+    const newPanX = mouseX - imgX * newZoom;
+    const newPanY = mouseY - imgY * newZoom;
+
+    setState(s => ({ ...s, zoom: newZoom, pan: { x: newPanX, y: newPanY } }));
+  };
+
   const handleMouseDown = (e: React.MouseEvent) => {
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
@@ -630,6 +708,19 @@ const App = () => {
     const x = (e.clientX - rect.left) * scaleX;
     const y = (e.clientY - rect.top) * scaleY;
     const startPoint = { x, y };
+
+    // Pan Mode Trigger
+    if (state.activeTool === 'pan' || e.button === 1 || e.buttons === 4) { // Middle click usually 4 or button 1
+         setDragState({
+             mode: 'pan',
+             startPoint, // Image coords (not used much for pan)
+             startScreenPoint: { x: e.clientX, y: e.clientY },
+             activeHandle: null,
+             initialPoints: [],
+             initialPan: { ...state.pan }
+         });
+         return;
+    }
 
     if (state.activeTool === 'select') {
         // 1. Check handles of currently selected shape
@@ -651,7 +742,7 @@ const App = () => {
             if (selectedShape) {
                 const handle = getHandleUnderCursor(x, y, selectedShape);
                 if (handle) {
-                    setDragState({ mode: 'resize', startPoint, activeHandle: handle, initialPoints: JSON.parse(JSON.stringify(selectedShape.points)) });
+                    setDragState({ mode: 'resize', startPoint, startScreenPoint: {x:0,y:0}, activeHandle: handle, initialPoints: JSON.parse(JSON.stringify(selectedShape.points)) });
                     return;
                 }
             }
@@ -666,7 +757,7 @@ const App = () => {
               activeGroupId: hit.group?.id || s.activeGroupId,
               activeCalibrationTarget: hit.type || s.activeCalibrationTarget // Auto switch context on select
             }));
-            setDragState({ mode: 'move', startPoint, activeHandle: null, initialPoints: JSON.parse(JSON.stringify(hit.shape.points)) });
+            setDragState({ mode: 'move', startPoint, startScreenPoint: {x:0,y:0}, activeHandle: null, initialPoints: JSON.parse(JSON.stringify(hit.shape.points)) });
         } else {
             setState(s => ({ ...s, selectedShapeId: null }));
         }
@@ -706,12 +797,21 @@ const App = () => {
                  setState(s => ({ ...s, roiGroups: [...s.roiGroups, newGroup], activeGroupId: newGroup.id, selectedShapeId: newShape.id }));
              }
         }
-        setDragState({ mode: 'create', startPoint, activeHandle: null, initialPoints: [] });
+        setDragState({ mode: 'create', startPoint, startScreenPoint: {x:0,y:0}, activeHandle: null, initialPoints: [] });
     }
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!dragState || !canvasRef.current) return;
+
+    // Pan Logic
+    if (dragState.mode === 'pan' && dragState.initialPan) {
+         const dx = e.clientX - dragState.startScreenPoint.x;
+         const dy = e.clientY - dragState.startScreenPoint.y;
+         setState(s => ({ ...s, pan: { x: dragState.initialPan!.x + dx, y: dragState.initialPan!.y + dy } }));
+         return;
+    }
+
     const rect = canvasRef.current.getBoundingClientRect();
     const scaleX = canvasRef.current.width / rect.width;
     const scaleY = canvasRef.current.height / rect.height;
@@ -808,10 +908,54 @@ const App = () => {
         }
     }
     setDragState(null);
-    if (state.activeTool !== 'select') {
+    if (state.activeTool !== 'select' && state.activeTool !== 'pan') {
          setState(s => ({ ...s, activeTool: 'select' }));
     }
   };
+
+  const deleteSelectedShape = () => {
+    setState(s => {
+      if (!s.selectedShapeId) return s;
+
+      let newState = { ...s };
+      
+      if (s.activeTab === 'segmentation') {
+        newState.exclusionZones = s.exclusionZones.filter(shape => shape.id !== s.selectedShapeId);
+      } else if (s.activeTab === 'calibration') {
+        if (s.calibrationROI?.id === s.selectedShapeId) {
+             newState.calibrationROI = null;
+             newState.calibrationColor = null;
+        }
+        if (s.whitePointROI?.id === s.selectedShapeId) {
+             newState.whitePointROI = null;
+             newState.whitePointColor = null;
+        }
+        if (s.blackPointROI?.id === s.selectedShapeId) {
+             newState.blackPointROI = null;
+             newState.blackPointColor = null;
+        }
+      } else if (s.activeTab === 'analysis') {
+        newState.roiGroups = s.roiGroups.map(g => ({
+          ...g,
+          shapes: g.shapes.filter(shape => shape.id !== s.selectedShapeId)
+        }));
+      }
+      
+      newState.selectedShapeId = null;
+      return newState;
+    });
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedShapeId) {
+        if (document.activeElement?.tagName === 'INPUT') return;
+        deleteSelectedShape();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [state.selectedShapeId, state.activeTab]);
 
   const calculateCalibrationFromROI = (shape: Shape, type: 'gray' | 'white' | 'black') => {
      if (!loadedImageRef.current || !canvasRef.current) return;
@@ -1135,7 +1279,7 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
       {/* Main Content */}
       <main className="flex-1 flex flex-col relative overflow-hidden">
         {state.activeTab !== 'report' && (
-          <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 backdrop-blur z-20">
+          <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 backdrop-blur z-20 relative">
             <div className="flex items-center gap-4">
               <h2 className="font-medium text-slate-200 hidden md:block">
                 {state.activeTab === 'segmentation' && 'Vegetation Segmentation'}
@@ -1146,10 +1290,17 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
               {/* Tools */}
               {(state.activeTab === 'segmentation' || state.activeTab === 'analysis') && (
                 <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-4">
+                  <button onClick={() => setState(s => ({...s, activeTool: 'pan'}))} className={`p-2 rounded ${state.activeTool === 'pan' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Pan (or Middle Click)"><Move size={16} /></button>
+                  <div className="w-[1px] h-6 bg-slate-700 mx-1"></div>
                   <button onClick={() => setState(s => ({...s, activeTool: 'select'}))} className={`p-2 rounded ${state.activeTool === 'select' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><MousePointer2 size={16} /></button>
                   <button onClick={() => setState(s => ({...s, activeTool: 'rect'}))} className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><Square size={16} /></button>
                   <button onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><CircleIcon size={16} /></button>
                   <button onClick={() => setState(s => ({...s, activeTool: 'lasso'}))} className={`p-2 rounded ${state.activeTool === 'lasso' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><Lasso size={16} /></button>
+                  {state.selectedShapeId && (
+                     <button onClick={deleteSelectedShape} className="p-2 rounded text-rose-400 hover:bg-rose-900/50 ml-2 border-l border-slate-700" title="Delete Selection">
+                        <Trash2 size={16} />
+                     </button>
+                  )}
                 </div>
               )}
               
@@ -1177,14 +1328,31 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
                         className={`p-1.5 rounded text-xs flex items-center gap-1 transition-colors ${state.activeCalibrationTarget === 'black' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}
                       ><Moon size={14}/> Black</button>
                    </div>
+                   <button onClick={() => setState(s => ({...s, activeTool: 'pan'}))} className={`p-2 rounded ${state.activeTool === 'pan' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Pan"><Move size={16} /></button>
                    <button onClick={() => setState(s => ({...s, activeTool: 'select'}))} className={`p-2 rounded ${state.activeTool === 'select' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}><MousePointer2 size={16} /></button>
                    <button onClick={() => setState(s => ({...s, activeTool: 'rect'}))} className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Rectangle Region"><Square size={16} /></button>
                    <button onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`} title="Circle Region"><CircleIcon size={16} /></button>
+                   {state.selectedShapeId && (
+                     <button onClick={deleteSelectedShape} className="p-2 rounded text-rose-400 hover:bg-rose-900/50 ml-2 border-l border-slate-700" title="Delete Selection">
+                        <Trash2 size={16} />
+                     </button>
+                   )}
                 </div>
               )}
             </div>
             
             <div className="flex items-center gap-3">
+               {/* View Controls */}
+               {loadedImageRef.current && (
+                  <div className="flex items-center bg-slate-800 rounded border border-slate-700 mr-2">
+                     <button onClick={() => setState(s => ({...s, zoom: Math.max(0.01, s.zoom * 0.8)}))} className="p-1.5 hover:bg-slate-700 text-slate-400" title="Zoom Out"><ZoomOut size={14}/></button>
+                     <span className="text-[10px] w-12 text-center text-slate-400 font-mono">{(state.zoom * 100).toFixed(0)}%</span>
+                     <button onClick={() => setState(s => ({...s, zoom: Math.min(50, s.zoom * 1.25)}))} className="p-1.5 hover:bg-slate-700 text-slate-400" title="Zoom In"><ZoomIn size={14}/></button>
+                     <div className="w-[1px] h-4 bg-slate-700 mx-1"></div>
+                     <button onClick={fitImageToScreen} className="p-1.5 hover:bg-slate-700 text-slate-400" title="Fit to Screen"><Minimize size={14}/></button>
+                  </div>
+               )}
+
               {/* Image Navigation */}
               {state.gallery.length > 0 && (
                  <div className="flex items-center bg-slate-800 rounded border border-slate-700 mr-2">
@@ -1367,26 +1535,39 @@ ${JSON.stringify(state.roiGroups.map(g => ({ name: g.name, stats: g.stats })), n
                       </div>
                    </div>
                 ) : (
-                  <div className="flex-1 bg-slate-900 rounded-xl border border-slate-800 relative flex items-center justify-center overflow-hidden cursor-crosshair">
-                    <div className="relative max-w-full max-h-full">
-                      <canvas ref={canvasRef} className="block max-w-full max-h-full object-contain" />
-                      <canvas 
-                        ref={overlayRef} 
-                        className={`absolute inset-0 w-full h-full pointer-events-auto ${state.activeTool === 'select' ? 'cursor-default' : 'cursor-crosshair'}`}
-                        style={{ cursor: dragState?.activeHandle ? (dragState.activeHandle === 'nw' || dragState.activeHandle === 'se' ? 'nwse-resize' : 'nesw-resize') : (state.activeTool === 'select' ? (state.selectedShapeId && getShapeUnderCursor(0,0)?.shape.id === state.selectedShapeId ? 'move' : 'default') : 'crosshair') }}
-                        onMouseDown={handleMouseDown}
-                        onMouseMove={handleMouseMove}
-                        onMouseUp={handleMouseUp}
-                      />
-                    </div>
+                  <div ref={containerRef} onWheel={handleWheel} className="flex-1 bg-slate-900 rounded-xl border border-slate-800 relative overflow-hidden cursor-crosshair">
+                     {/* Transform Wrapper */}
+                     <div 
+                        style={{ 
+                            transform: `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`, 
+                            transformOrigin: '0 0',
+                            width: '100%', 
+                            height: '100%' 
+                        }}
+                     >
+                        <canvas ref={canvasRef} className="absolute inset-0 block" />
+                        <canvas 
+                          ref={overlayRef} 
+                          className={`absolute inset-0 w-full h-full pointer-events-auto ${state.activeTool === 'select' ? 'cursor-default' : (state.activeTool === 'pan' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair')}`}
+                          style={{ 
+                              cursor: dragState?.activeHandle ? (dragState.activeHandle === 'nw' || dragState.activeHandle === 'se' ? 'nwse-resize' : 'nesw-resize') : (state.activeTool === 'select' ? (state.selectedShapeId && getShapeUnderCursor(0,0)?.shape.id === state.selectedShapeId ? 'move' : 'default') : (state.activeTool === 'pan' ? 'grab' : 'crosshair')) 
+                          }}
+                          onMouseDown={handleMouseDown}
+                          onMouseMove={handleMouseMove}
+                          onMouseUp={handleMouseUp}
+                          // Prevent context menu on right click for better UX
+                          onContextMenu={e => e.preventDefault()}
+                        />
+                     </div>
                   </div>
                 )}
                 
                 {/* Hints */}
                 <div className="text-xs text-slate-500 flex gap-4">
-                  {state.activeTab === 'segmentation' && <span>Use tools to erase background artifacts. Select to move/resize.</span>}
-                  {state.activeTab === 'calibration' && <span>Select a target type (Gray/White/Black) and draw a region.</span>}
-                  {state.activeTab === 'analysis' && <span>Use Lasso or Rect tool to define plant groups. Select to edit.</span>}
+                  <span>Use scroll wheel to zoom. Middle-click to pan.</span>
+                  {state.activeTab === 'segmentation' && <span> | Use tools to erase background artifacts.</span>}
+                  {state.activeTab === 'calibration' && <span> | Select a target type and draw a region.</span>}
+                  {state.activeTab === 'analysis' && <span> | Use Lasso or Rect tool to define plant groups.</span>}
                 </div>
               </div>
 
