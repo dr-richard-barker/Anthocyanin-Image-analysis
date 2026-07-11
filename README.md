@@ -155,4 +155,5 @@ optional and clearly labelled.
 
 ## Licence
 
-Add a `LICENSE` file (e.g. MIT) if one is not already present.
+[MIT](LICENSE) © Richard Barker. Free to use, modify, and redistribute — including
+within the AIRI education programme — provided the copyright notice is retained.
