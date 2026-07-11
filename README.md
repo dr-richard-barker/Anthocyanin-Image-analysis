@@ -50,9 +50,12 @@ Work left-to-right through the sidebar tabs:
    plant and nothing else. Use the shape tools (rectangle / circle / lasso) to draw
    **exclusion zones** over soil, labels, pots, or reflections you want ignored.
 2. **Calibration & Units**
-   - *Scale:* enter the physical **edge length (cm)** of your Astrocalibration marker, click
-     **Set Scale from Marker**, then drag a box tightly over the marker. The tool derives
-     **pixels/cm** so areas report in **cm²**. (Skip this and areas report in pixels.)
+   - *Astrocalibration marker (recommended):* click **Detect Marker (colour + scale)**. The tool
+     finds the marker's ArUco fiducials and, in one step, sets the scale and computes a full
+     **affine colour correction** (PlantCV `astro_color_matrix`-equivalent). Drag the purple corner
+     handles so the pink chip dots sit on the marker's colour patches; watch the **residual** drop.
+   - *Manual scale (fallback):* enter the physical **edge length (cm)** of your marker, click
+     **Set Scale from Marker**, then drag a box tightly over it to derive **pixels/cm**.
    - *Colour:* pick the **grey / white / black** target and draw a box over the matching
      reference patch to white-balance the image before indices are computed.
    - *Geometry:* nudge the **Tilt** and **Lens** sliders if the image is rotated or distorted.
@@ -133,8 +136,9 @@ Full design + PlantCV interoperability write-up: **[docs/astrocalibration.md](do
 The marker is the AIRI *Bio Imaging Spectrum 5 cm* sticker ([order here](https://www.stickermule.com/drb2025/item/19181049)):
 4 corner ArUco fiducials + colour chips + grayscale ramp + 0–5 cm ruler.
 - [x] Bundle demo images that contain the marker (ExoLab-11 GRW08 timelapse) + a segmentation example (Hydra-1).
-- [ ] Hard-code the 15-chip `astro_color_matrix()` standard and apply **affine colour correction** (PlantCV-equivalent) in the canvas pipeline.
-- [ ] **Automatic marker detection** via the 4 ArUco fiducials (pure-JS, e.g. js-aruco2) to recover scale *and* rotation without manual boxing — offline auto-calibration.
+- [x] Hard-code the 15-chip `astro_color_matrix()` standard and apply **affine colour correction** (PlantCV-equivalent) in the canvas pipeline ([`colorcalib.ts`](colorcalib.ts)).
+- [x] **Automatic marker detection** via the 4 ArUco fiducials (pure-JS `js-aruco2`) → auto scale + colour correction, with draggable corners + a live residual readout. See **[Detect Marker]** in Calibration & Units.
+- [ ] Perspective homography + auto-rotation from the fiducials (currently bilinear + manual tilt).
 - [ ] Print/document the marker chip-layout spec as an SVG/PDF in this repo.
 - [ ] Optional "PlantCV pro" Colab notebook sharing the same marker standard.
 

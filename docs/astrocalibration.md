@@ -144,13 +144,28 @@ The image picker ships with frames that contain the marker plus a segmentation e
 
 ---
 
-## 6. Roadmap checklist
+## 6. Implementation status
 
-- [ ] Hard‑code `ASTRO_STD_MATRIX` (15×4) from `astro_color_matrix()`.
-- [ ] Add `js-aruco2` (or equivalent) corner detection for the 4 fiducials.
-- [ ] Homography → auto scale (px/cm) + rotation from the marker.
-- [ ] Sample the 15 chips → source matrix.
-- [ ] Least‑squares affine colour correction applied in the canvas pipeline.
-- [ ] UI in **Calibration & Units**: "Detect Astrocalibration marker" with manual fallback.
-- [ ] Document/print the marker spec (chip layout + positions) as an SVG/PDF in this repo.
+Implemented in [`colorcalib.ts`](../colorcalib.ts) and wired into the **Calibration & Units** tab
+(button: **Detect Marker (colour + scale)**):
+
+- [x] Hard‑coded 15‑chip Astro standard (`ASTRO_CHIPS`) from `astro_color_matrix()`.
+- [x] `js-aruco2` corner detection (dictionary `ARUCO_MIP_36h12`), lazy‑loaded chunk.
+- [x] Auto scale (px/cm) from the detected corner quad; graceful degradation to 2/3 markers.
+- [x] Sample the 15 chips through the quad → source matrix (median patch per chip).
+- [x] Least‑squares 3×4 affine colour correction, applied per‑pixel in the analysis pipeline.
+- [x] UI: detect, a **live residual (fit‑quality) readout**, an on/off toggle, and **draggable
+      corner handles** so the user aligns the sampling quad to their own photo (manual
+      white/grey/black remains as fallback).
+
+**Known limitations (by design, surfaced to the user):**
+- Under glare/occlusion fewer than 4 fiducials may be found (the seeded quad then needs manual
+  corner dragging — the residual makes this obvious).
+- Over‑exposed markers (clipped highlights) cannot be fully linearised by a single affine; the
+  residual will stay high. Use a well‑exposed marker photo for best results.
+
+**Still open:**
+- [ ] Perspective homography (currently bilinear) for steeply‑angled cards.
+- [ ] Auto‑rotation from the fiducials (kept manual for now to avoid overlay drift).
+- [ ] Document/print the marker chip‑layout spec as an SVG/PDF in this repo.
 - [ ] "PlantCV pro" Colab notebook sharing the same standard.

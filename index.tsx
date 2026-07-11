@@ -31,9 +31,11 @@ import {
   Move,
   Minimize,
   RotateCw,
-  Ruler
+  Ruler,
+  ScanLine
 } from 'lucide-react';
 import JSZip from 'jszip';
+import { ASTRO_CHIPS, detectMarkerCorners, fitFromQuad, scaleAndRotation, chipImagePoints, applyAffineToImageData, type Pt } from './colorcalib';
 
 // --- Types ---
 
@@ -81,7 +83,15 @@ interface AppState {
   isProcessing: boolean;
   
   // Calibration
-  activeCalibrationTarget: 'scale' | 'gray' | 'white' | 'black';
+  activeCalibrationTarget: 'astro' | 'scale' | 'gray' | 'white' | 'black';
+
+  // Astrocalibration marker (colour correction + auto scale/rotation)
+  markerCorners: Pt[] | null;        // 4 corners, image coords, order TL,TR,BR,BL
+  colorMatrix: number[][] | null;    // 3x4 affine RGB correction
+  colorCorrectionEnabled: boolean;
+  colorResidual: number | null;      // fit quality (RMS, 0-1 space)
+  markerFound: number;               // # fiducials auto-detected
+  isDetectingMarker: boolean;
   calibrationColor: { r: number, g: number, b: number } | null;
   calibrationROI: Shape | null;
   whitePointColor: { r: number, g: number, b: number } | null;
@@ -124,12 +134,13 @@ interface AppState {
 }
 
 interface DragState {
-  mode: 'move' | 'resize' | 'create' | 'pan';
-  startPoint: Point; 
-  startScreenPoint: Point; 
-  activeHandle: string | null; 
-  initialPoints: Point[]; 
-  initialPan?: { x: number, y: number }; 
+  mode: 'move' | 'resize' | 'create' | 'pan' | 'corner';
+  startPoint: Point;
+  startScreenPoint: Point;
+  activeHandle: string | null;
+  initialPoints: Point[];
+  initialPan?: { x: number, y: number };
+  cornerIndex?: number;
 }
 
 // --- Constants ---
@@ -240,6 +251,7 @@ const App = () => {
     gallery: [], activeImageIndex: 0, segmentationThreshold: 20, activeTab: 'segmentation', visualizationMode: 'rgb', isProcessing: false,
     activeCalibrationTarget: 'scale', calibrationColor: null, calibrationROI: null, whitePointColor: null, whitePointROI: null, blackPointColor: null, blackPointROI: null,
     rotationAngle: 0, lensCorrection: 0, markerPhysicalSize: 2.0, scaleROI: null, pixelsPerCm: null,
+    markerCorners: null, colorMatrix: null, colorCorrectionEnabled: false, colorResidual: null, markerFound: 0, isDetectingMarker: false,
     exclusionZones: [], roiGroups: [], activeGroupId: null, isGithubModalOpen: false, activeTool: 'select', selectedShapeId: null, zoom: 1, pan: { x: 0, y: 0 },
     reportSummary: '', processedImageURL: null, reportImages: {}, regressionParams: { slope: 1.5, intercept: 0.2, targetIndex: 'mACI' }
   });
@@ -263,7 +275,7 @@ const App = () => {
     img.src = state.gallery[state.activeImageIndex].url;
     img.onload = () => {
       loadedImageRef.current = img;
-      setState(s => ({ ...s, exclusionZones: [], roiGroups: [], activeGroupId: null, rotationAngle: 0, lensCorrection: 0, scaleROI: null, pixelsPerCm: null, selectedShapeId: null }));
+      setState(s => ({ ...s, exclusionZones: [], roiGroups: [], activeGroupId: null, rotationAngle: 0, lensCorrection: 0, scaleROI: null, pixelsPerCm: null, selectedShapeId: null, markerCorners: null, colorMatrix: null, colorCorrectionEnabled: false, colorResidual: null, markerFound: 0 }));
       setTimeout(fitImageToScreen, 50);
     };
   }, [state.activeImageIndex, state.gallery]);
@@ -277,7 +289,8 @@ const App = () => {
 
   useEffect(() => { if (state.activeTab !== 'report') runPipeline(); }, [
     state.segmentationThreshold, state.activeTab, state.visualizationMode, state.calibrationColor, state.whitePointColor, state.blackPointColor,
-    state.rotationAngle, state.lensCorrection, state.exclusionZones, state.roiGroups, state.pixelsPerCm, loadedImageRef.current
+    state.rotationAngle, state.lensCorrection, state.exclusionZones, state.roiGroups, state.pixelsPerCm,
+    state.colorCorrectionEnabled, state.colorMatrix, loadedImageRef.current
   ]);
 
   const runPipeline = (customMode?: VisualizationMode, targetCanvas?: HTMLCanvasElement) => {
@@ -307,10 +320,17 @@ const App = () => {
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height), data = imageData.data;
       const width = canvas.width, height = canvas.height;
       const groupStats = state.roiGroups.map(g => ({ ...g, stats: { pixelCount: 0, areaCm2: 0, meanNGRDI: 0, meanMACI: 0, meanGI: 0, anthocyanin: 0, sumR: 0, sumG: 0, sumB: 0, sumNGRDI: 0, sumMACI: 0, sumGI: 0 } }));
-      
+
+      // Astrocalibration affine colour correction (supersedes the 3-point white
+      // balance below when active).
+      const colorCorrected = state.colorCorrectionEnabled && state.colorMatrix;
+      if (colorCorrected) applyAffineToImageData(data, state.colorMatrix!);
+
       let rS = 1, gS = 1, bS = 1;
-      if (state.whitePointColor) { rS = 255/state.whitePointColor.r; gS = 255/state.whitePointColor.g; bS = 255/state.whitePointColor.b; }
-      else if (state.calibrationColor) { rS = 128/state.calibrationColor.r; gS = 128/state.calibrationColor.g; bS = 128/state.calibrationColor.b; }
+      if (!colorCorrected) {
+        if (state.whitePointColor) { rS = 255/state.whitePointColor.r; gS = 255/state.whitePointColor.g; bS = 255/state.whitePointColor.b; }
+        else if (state.calibrationColor) { rS = 128/state.calibrationColor.r; gS = 128/state.calibrationColor.g; bS = 128/state.calibrationColor.b; }
+      }
 
       for (let i = 0; i < data.length; i += 4) {
         const x = (i/4) % width, y = Math.floor((i/4) / width);
@@ -400,6 +420,7 @@ const App = () => {
     if (state.activeTab !== 'report') {
       state.exclusionZones.forEach(s => drawShape(s, '#ef4444', true, s.id === state.selectedShapeId));
       if (state.activeTab === 'calibration') {
+        if (state.markerCorners) drawMarkerOverlay(ctx, state.markerCorners);
         if (state.scaleROI) drawShape(state.scaleROI, '#a855f7', true, state.scaleROI.id === state.selectedShapeId);
         if (state.calibrationROI) drawShape(state.calibrationROI, '#ffffff', false, state.calibrationROI.id === state.selectedShapeId);
         if (state.whitePointROI) drawShape(state.whitePointROI, '#06b6d4', false, state.whitePointROI.id === state.selectedShapeId);
@@ -424,6 +445,64 @@ const App = () => {
     setState(s => ({ ...s, activeCalibrationTarget: 'scale', activeTool: 'rect' }));
   };
 
+  // --- Astrocalibration marker (colour correction + auto scale/rotation) ---
+
+  const CORNER_HIT = 14; // px (image space) hit radius for dragging corners
+
+  const drawMarkerOverlay = (ctx: CanvasRenderingContext2D, corners: Pt[]) => {
+    const z = state.zoom || 1;
+    ctx.save();
+    // sampling quad
+    ctx.beginPath();
+    ctx.moveTo(corners[0].x, corners[0].y);
+    corners.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.closePath();
+    ctx.lineWidth = 2 / z; ctx.strokeStyle = '#a855f7'; ctx.stroke();
+    // chip sample points
+    chipImagePoints(corners).forEach(p => {
+      ctx.beginPath(); ctx.arc(p.x, p.y, 4 / z, 0, 2 * Math.PI);
+      ctx.fillStyle = '#f0abfc'; ctx.fill();
+      ctx.lineWidth = 1 / z; ctx.strokeStyle = '#581c87'; ctx.stroke();
+    });
+    // draggable corner handles
+    const hs = CORNER_HIT / z;
+    corners.forEach(p => { ctx.fillStyle = '#a855f7'; ctx.fillRect(p.x - hs / 2, p.y - hs / 2, hs, hs); });
+    ctx.restore();
+  };
+
+  const rawImageData = (): { data: Uint8ClampedArray; w: number; h: number } | null => {
+    const img = loadedImageRef.current; if (!img) return null;
+    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    const cx = c.getContext('2d', { willReadFrequently: true }); if (!cx) return null;
+    cx.drawImage(img, 0, 0);
+    const id = cx.getImageData(0, 0, img.width, img.height);
+    return { data: id.data, w: img.width, h: img.height };
+  };
+
+  const refitColor = (corners: Pt[]) => {
+    const raw = rawImageData(); if (!raw) return;
+    const fit = fitFromQuad(raw.data, raw.w, raw.h, corners);
+    setState(s => ({ ...s, colorMatrix: fit.matrix, colorResidual: fit.residual, colorCorrectionEnabled: true }));
+  };
+
+  const handleDetectMarker = async () => {
+    const raw = rawImageData(); if (!raw) return;
+    setState(s => ({ ...s, isDetectingMarker: true, activeCalibrationTarget: 'astro' }));
+    const { corners, found } = await detectMarkerCorners(raw.data, raw.w, raw.h);
+    if (!corners) {
+      setState(s => ({ ...s, isDetectingMarker: false, markerFound: 0 }));
+      alert('No Astrocalibration marker detected automatically. Draw the 4 corners by dragging the purple handles, or use manual white/grey/black calibration.');
+      return;
+    }
+    const { pxPerCm } = scaleAndRotation(corners);
+    const fit = fitFromQuad(raw.data, raw.w, raw.h, corners);
+    setState(s => ({
+      ...s, markerCorners: corners, markerFound: found, isDetectingMarker: false,
+      colorMatrix: fit.matrix, colorResidual: fit.residual, colorCorrectionEnabled: true,
+      pixelsPerCm: pxPerCm > 0 && isFinite(pxPerCm) ? pxPerCm : s.pixelsPerCm,
+    }));
+  };
+
   const handleMouseDown = (e: React.MouseEvent) => {
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
@@ -431,6 +510,13 @@ const App = () => {
     const startPoint = { x, y };
 
     if (state.activeTool === 'pan' || e.button === 1) { setDragState({ mode: 'pan', startPoint, startScreenPoint: { x: e.clientX, y: e.clientY }, activeHandle: null, initialPoints: [], initialPan: { ...state.pan } }); return; }
+
+    // Astrocalibration: drag a marker corner handle (takes priority over tools).
+    if (state.activeTab === 'calibration' && state.markerCorners) {
+      const hit = CORNER_HIT / (state.zoom || 1);
+      const idx = state.markerCorners.findIndex(p => Math.abs(p.x - x) <= hit && Math.abs(p.y - y) <= hit);
+      if (idx >= 0) { setDragState({ mode: 'corner', startPoint, startScreenPoint: { x: 0, y: 0 }, activeHandle: null, initialPoints: [], cornerIndex: idx }); return; }
+    }
 
     if (state.activeTool === 'select') {
       const hit = getShapeUnderCursor(x, y);
@@ -462,6 +548,12 @@ const App = () => {
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) * (canvasRef.current.width / rect.width), y = (e.clientY - rect.top) * (canvasRef.current.height / rect.height);
     const curr = { x, y };
+
+    if (dragState.mode === 'corner' && dragState.cornerIndex != null && state.markerCorners) {
+      const idx = dragState.cornerIndex;
+      setState(s => ({ ...s, markerCorners: s.markerCorners!.map((p, i) => i === idx ? curr : p) }));
+      return;
+    }
 
     let sId = state.selectedShapeId; if (!sId) return;
     const update = (newP: Point[]) => {
@@ -502,6 +594,11 @@ const App = () => {
   };
 
   const handleMouseUp = () => {
+    if (dragState?.mode === 'corner' && state.markerCorners) {
+      refitColor(state.markerCorners); // recompute colour transform from the adjusted quad
+      setDragState(null);
+      return;
+    }
     if (state.activeTab === 'calibration' && state.selectedShapeId) {
       const s = getSelectedShapeObj();
       if (s) {
@@ -685,6 +782,27 @@ const App = () => {
             {state.activeTab === 'calibration' && (
               <div className="space-y-6">
                 <div>
+                  <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 flex items-center gap-2"><ScanLine size={14}/> Astrocalibration Marker</h3>
+                  <p className="text-[10px] text-slate-400 leading-relaxed mb-3 italic">Auto-detect the AIRI marker for one-step colour correction + scale. Then drag the purple corner handles to fine-tune, and watch the fit residual.</p>
+                  <button disabled={state.isDetectingMarker} onClick={handleDetectMarker} className="w-full flex items-center justify-center gap-2 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded text-[10px] font-bold transition-all mb-3">
+                    {state.isDetectingMarker ? <RefreshCw className="animate-spin" size={14}/> : <ScanLine size={14}/>} {state.isDetectingMarker ? 'Detecting…' : 'Detect Marker (colour + scale)'}
+                  </button>
+                  {state.markerCorners && (
+                    <div className="space-y-2">
+                      <label className="flex items-center justify-between text-[10px] text-slate-300 bg-slate-950 p-2 rounded border border-slate-800">
+                        <span>Apply colour correction</span>
+                        <input type="checkbox" checked={state.colorCorrectionEnabled} onChange={(e) => setState(s => ({ ...s, colorCorrectionEnabled: e.target.checked }))} className="accent-purple-500" />
+                      </label>
+                      <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                        <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">Fiducials <span className="text-purple-300">{state.markerFound}/4</span></div>
+                        <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">Residual <span className={state.colorResidual != null && state.colorResidual < 0.08 ? 'text-emerald-400' : 'text-amber-400'}>{state.colorResidual != null ? state.colorResidual.toFixed(3) : '-'}</span></div>
+                      </div>
+                      <p className="text-[9px] text-slate-500 leading-relaxed">Lower residual = better fit. If the pink chip dots don't sit on the marker's colour patches, drag the corner handles to align them. Over-exposed markers fit poorly.</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-4 border-t border-slate-800">
                   <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 flex items-center gap-2"><RotateCw size={14}/> Geometric Alignment</h3>
                   <div className="mt-1">
                     <div className="flex justify-between text-[10px] mb-2 text-slate-400"><span>Tilt Correction</span><span className="font-mono text-indigo-400">{state.rotationAngle.toFixed(1)}°</span></div>

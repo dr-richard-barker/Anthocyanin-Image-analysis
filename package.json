@@ -10,10 +10,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
+    "js-aruco2": "^2.0.0",
+    "jszip": "3.10.1",
     "lucide-react": "^0.563.0",
-    "jszip": "3.10.1"
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
