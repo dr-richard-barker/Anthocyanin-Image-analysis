@@ -1,7 +1,7 @@
 {
-  "name": "image-analysis-application",
+  "name": "anthocyanin-image-analysis",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,6 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "lucide-react": "^0.563.0",
-    "@google/genai": "^1.40.0",
     "jszip": "3.10.1"
   },
   "devDependencies": {
