@@ -207,23 +207,40 @@ export async function detectMarkerCorners(
     for (let i = 0; i < 4; i++) { const p = c[i], q = c[(i + 1) % 4]; a += p.x * q.y - q.x * p.y; }
     return Math.abs(a / 2);
   };
-  const centres = markers
+  const ranked = markers
     .map(m => ({ area: areaOf(m.corners), cx: m.corners.reduce((s: number, p: Pt) => s + p.x, 0) / 4, cy: m.corners.reduce((s: number, p: Pt) => s + p.y, 0) / 4 }))
     .filter(m => m.area > (w * h) * 0.0004) // drop tiny false positives
     .sort((a, b) => b.area - a.area)
-    .slice(0, 4)
     .map(m => ({ x: m.cx, y: m.cy }));
 
-  if (centres.length >= 4) return { corners: orderCorners(centres.slice(0, 4)), found: centres.length };
+  // Deduplicate: the detector often returns the SAME physical fiducial more than
+  // once (different candidate IDs). Merge centres closer than ~4% of the image.
+  const mergeDist = Math.min(w, h) * 0.04;
+  const centres: Pt[] = [];
+  for (const c of ranked) {
+    if (!centres.some(k => Math.hypot(k.x - c.x, k.y - c.y) < mergeDist)) centres.push(c);
+    if (centres.length === 4) break;
+  }
+
+  if (centres.length >= 4) return { corners: orderCorners(centres.slice(0, 4)), found: 4 };
   if (centres.length === 3) {
-    const [a, b, c] = orderCorners([...centres, centres[0]]).slice(0, 3);
-    return { corners: orderCorners([a, b, c, { x: a.x + c.x - b.x, y: a.y + c.y - b.y }]), found: 3 };
+    // complete the parallelogram: the 4th corner is opposite the "middle" vertex
+    const [a, b, c] = centres;
+    const cand = { x: a.x + c.x - b.x, y: a.y + c.y - b.y };
+    return { corners: orderCorners([a, b, c, cand]), found: 3 };
   }
   if (centres.length === 2) {
-    // assume the two found are a horizontal edge; extrude downward to seed a quad
-    const [p, q] = centres.sort((m, n) => m.x - n.x);
-    const dyGuess = Math.hypot(q.x - p.x, q.y - p.y) * 1.25;
-    const corners = [p, q, { x: q.x, y: q.y + dyGuess }, { x: p.x, y: p.y + dyGuess }];
+    // Only one edge found (common: glare hides the far side). Extrude a square-ish
+    // quad perpendicular to that edge, toward the image interior, as a starting
+    // guess the user drags into place.
+    const [p, q] = [...centres].sort((m, n) => m.x - n.x);
+    const ex = q.x - p.x, ey = q.y - p.y, len = Math.hypot(ex, ey) || 1;
+    let nx = -ey / len, ny = ex / len; // unit normal to the edge
+    // Default the guess to extrude "upward" (toward smaller y); the two reliably
+    // detected fiducials are usually the card's lower edge. The user drags to fix.
+    if (ny > 0) { nx = -nx; ny = -ny; }
+    const d = len * 1.27; // card is slightly taller than the corner-to-corner span
+    const corners = [p, q, { x: q.x + nx * d, y: q.y + ny * d }, { x: p.x + nx * d, y: p.y + ny * d }];
     return { corners: orderCorners(corners), found: 2 };
   }
   return { corners: null, found: centres.length };

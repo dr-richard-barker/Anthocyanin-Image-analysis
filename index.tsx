@@ -152,7 +152,7 @@ interface DragState {
 const DEMO_IMAGES = [
   {
     label: 'ExoLab-11 · Astrocalibration marker',
-    url: 'https://raw.githubusercontent.com/dr-richard-barker/ExoLab_11/main/grw08_images_11122024/imaging_lens_position_7.0_cam_0_1731087002.jpg'
+    url: 'https://raw.githubusercontent.com/dr-richard-barker/ExoLab_11/main/grw08_images_11122024/imaging_lens_position_7.0_cam_0_1731115802.jpg'
   },
   {
     label: 'ExoLab-11 · GRW08 timelapse (early)',
@@ -283,7 +283,9 @@ const App = () => {
   const fitImageToScreen = () => {
     if (!loadedImageRef.current || !containerRef.current) return;
     const container = containerRef.current, img = loadedImageRef.current;
-    const zoom = Math.min((container.clientWidth - 40) / img.width, (container.clientHeight - 40) / img.height);
+    let zoom = Math.min((container.clientWidth - 40) / img.width, (container.clientHeight - 40) / img.height);
+    if (!(zoom > 0) || !isFinite(zoom)) zoom = Math.min(container.clientWidth / img.width, container.clientHeight / img.height) || 1;
+    zoom = Math.max(0.02, zoom); // never zero/negative
     setState(s => ({ ...s, zoom, pan: { x: (container.clientWidth - img.width * zoom) / 2, y: (container.clientHeight - img.height * zoom) / 2 } }));
   };
 
@@ -450,7 +452,7 @@ const App = () => {
   const CORNER_HIT = 14; // px (image space) hit radius for dragging corners
 
   const drawMarkerOverlay = (ctx: CanvasRenderingContext2D, corners: Pt[]) => {
-    const z = state.zoom || 1;
+    const z = state.zoom > 0 ? state.zoom : 1; // guard: never negative/zero radius
     ctx.save();
     // sampling quad
     ctx.beginPath();
