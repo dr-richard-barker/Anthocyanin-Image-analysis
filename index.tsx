@@ -30,12 +30,9 @@ import {
   ZoomOut,
   Move,
   Minimize,
-  Compass,
   RotateCw,
-  Ruler,
-  ScanLine
+  Ruler
 } from 'lucide-react';
-import { GoogleGenAI, Type } from "@google/genai";
 import JSZip from 'jszip';
 
 // --- Types ---
@@ -84,7 +81,7 @@ interface AppState {
   isProcessing: boolean;
   
   // Calibration
-  activeCalibrationTarget: 'gray' | 'white' | 'black';
+  activeCalibrationTarget: 'scale' | 'gray' | 'white' | 'black';
   calibrationColor: { r: number, g: number, b: number } | null;
   calibrationROI: Shape | null;
   whitePointColor: { r: number, g: number, b: number } | null;
@@ -95,8 +92,8 @@ interface AppState {
   // Geometric & Lens Calibration
   rotationAngle: number;
   lensCorrection: number; // Barrel/Pincushion simulation
-  isDetectingAruco: boolean;
-  markerPhysicalSize: number; // cm
+  markerPhysicalSize: number; // cm (physical edge length of the Astrocalibration scale marker)
+  scaleROI: Shape | null; // ROI drawn over the scale marker
   pixelsPerCm: number | null;
 
   // Segmentation Editing
@@ -190,13 +187,43 @@ const getBoundingBox = (shape: Shape) => {
   return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
 };
 
+// --- Deterministic Report Summary ---
+// Generates the report discussion from the measured statistics only. No LLM, so
+// the same inputs always yield the same text — reproducible for scientific use.
+const buildReportSummary = (groups: ROIGroup[], r: AppState['regressionParams']): string => {
+  const scored = groups.filter(g => g.stats && g.stats.pixelCount > 0);
+  if (scored.length === 0) {
+    return 'No analysis groups with segmented plant pixels were defined, so no quantitative comparison could be made. Draw one or more ROI groups over vegetated regions and regenerate the report to populate this section.';
+  }
+
+  const fmt = (n: number, d = 3) => (Number.isFinite(n) ? n.toFixed(d) : 'n/a');
+  const byArea = [...scored].sort((a, b) => (b.stats!.areaCm2) - (a.stats!.areaCm2));
+  const largest = byArea[0], smallest = byArea[byArea.length - 1];
+  const meanGI = scored.reduce((s, g) => s + g.stats!.meanGI, 0) / scored.length;
+  const meanMACI = scored.reduce((s, g) => s + g.stats!.meanMACI, 0) / scored.length;
+  const idxName = r.targetIndex;
+
+  const p1 = `A total of ${scored.length} region-of-interest cohort${scored.length > 1 ? 's were' : ' was'} quantified. ` +
+    (largest.stats!.areaCm2 > 0
+      ? `Projected leaf area ranged from ${fmt(smallest.stats!.areaCm2, 2)} cm² (${smallest.name}) to ${fmt(largest.stats!.areaCm2, 2)} cm² (${largest.name}). `
+      : `Areas are reported in pixels because no scale marker was calibrated; set the Astrocalibration marker to obtain cm² values. `) +
+    `Mean Green Index across cohorts was ${fmt(meanGI)}, and mean modified Anthocyanin Content Index (mACI) was ${fmt(meanMACI, 3)}.`;
+
+  const p2 = `Cohort-level detail: ` +
+    scored.map(g => `${g.name} — area ${fmt(g.stats!.areaCm2, 2)} cm², NGRDI ${fmt(g.stats!.meanNGRDI)}, mACI ${fmt(g.stats!.meanMACI)}, GI ${fmt(g.stats!.meanGI)}`).join('; ') + '. ' +
+    `Higher NGRDI and Green Index values indicate greater relative greenness (a proxy for chlorophyll and canopy vigour), while elevated mACI indicates stronger red/anthocyanin accumulation that is often associated with stress or maturity. ` +
+    `The estimated anthocyanin content shown in the group panels is derived from the ${idxName} index via the linear model anthocyanin = ${fmt(r.slope, 2)} × ${idxName} + ${fmt(r.intercept, 2)}; recalibrate the slope and intercept against your own pigment assay for absolute values.`;
+
+  return `${p1}\n${p2}`;
+};
+
 // --- Main App ---
 
 const App = () => {
   const [state, setState] = useState<AppState>({
     gallery: [], activeImageIndex: 0, segmentationThreshold: 20, activeTab: 'segmentation', visualizationMode: 'rgb', isProcessing: false,
-    activeCalibrationTarget: 'gray', calibrationColor: null, calibrationROI: null, whitePointColor: null, whitePointROI: null, blackPointColor: null, blackPointROI: null,
-    rotationAngle: 0, lensCorrection: 0, isDetectingAruco: false, markerPhysicalSize: 2.0, pixelsPerCm: null,
+    activeCalibrationTarget: 'scale', calibrationColor: null, calibrationROI: null, whitePointColor: null, whitePointROI: null, blackPointColor: null, blackPointROI: null,
+    rotationAngle: 0, lensCorrection: 0, markerPhysicalSize: 2.0, scaleROI: null, pixelsPerCm: null,
     exclusionZones: [], roiGroups: [], activeGroupId: null, isGithubModalOpen: false, activeTool: 'select', selectedShapeId: null, zoom: 1, pan: { x: 0, y: 0 },
     reportSummary: '', processedImageURL: null, reportImages: {}, regressionParams: { slope: 1.5, intercept: 0.2, targetIndex: 'mACI' }
   });
@@ -218,7 +245,7 @@ const App = () => {
     img.src = state.gallery[state.activeImageIndex].url;
     img.onload = () => {
       loadedImageRef.current = img;
-      setState(s => ({ ...s, exclusionZones: [], roiGroups: [], activeGroupId: null, rotationAngle: 0, lensCorrection: 0, pixelsPerCm: null, selectedShapeId: null }));
+      setState(s => ({ ...s, exclusionZones: [], roiGroups: [], activeGroupId: null, rotationAngle: 0, lensCorrection: 0, scaleROI: null, pixelsPerCm: null, selectedShapeId: null }));
       setTimeout(fitImageToScreen, 50);
     };
   }, [state.activeImageIndex, state.gallery]);
@@ -355,6 +382,7 @@ const App = () => {
     if (state.activeTab !== 'report') {
       state.exclusionZones.forEach(s => drawShape(s, '#ef4444', true, s.id === state.selectedShapeId));
       if (state.activeTab === 'calibration') {
+        if (state.scaleROI) drawShape(state.scaleROI, '#a855f7', true, state.scaleROI.id === state.selectedShapeId);
         if (state.calibrationROI) drawShape(state.calibrationROI, '#ffffff', false, state.calibrationROI.id === state.selectedShapeId);
         if (state.whitePointROI) drawShape(state.whitePointROI, '#06b6d4', false, state.whitePointROI.id === state.selectedShapeId);
         if (state.blackPointROI) drawShape(state.blackPointROI, '#f97316', false, state.blackPointROI.id === state.selectedShapeId);
@@ -365,23 +393,17 @@ const App = () => {
     }
   };
 
-  const handleDetectAruco = async () => {
-    if (!loadedImageRef.current) return;
-    setState(s => ({ ...s, isDetectingAruco: true }));
-    try {
-      const c = document.createElement('canvas'); c.width = loadedImageRef.current.width; c.height = loadedImageRef.current.height;
-      const ctx = c.getContext('2d'); ctx?.drawImage(loadedImageRef.current, 0, 0);
-      const b64 = c.toDataURL('image/jpeg', 0.8).split(',')[1];
-      const ai = new GeminiClient();
-      const corners = await ai.detectArucoCorners(b64);
-      if (corners && corners.length === 4) {
-        const dx = corners[1].x - corners[0].x, dy = corners[1].y - corners[0].y;
-        const angle = -(Math.atan2(dy, dx) * 180) / Math.PI;
-        const pxDist = Math.sqrt(dx*dx + dy*dy);
-        const ppcm = pxDist / state.markerPhysicalSize;
-        setState(s => ({ ...s, rotationAngle: angle, pixelsPerCm: ppcm, isDetectingAruco: false }));
-      } else { alert("Marker not found."); setState(s => ({ ...s, isDetectingAruco: false })); }
-    } catch { setState(s => ({ ...s, isDetectingAruco: false })); }
+  // Deterministic scale calibration: derive pixels/cm from an ROI drawn over the
+  // Astrocalibration marker of known physical edge length. No network / AI required.
+  const computeScaleFromROI = (shape: Shape) => {
+    const bb = getBoundingBox(shape);
+    const px = Math.max(bb.width, bb.height);
+    if (px <= 0 || state.markerPhysicalSize <= 0) return;
+    setState(s => ({ ...s, pixelsPerCm: px / s.markerPhysicalSize }));
+  };
+
+  const startScaleCalibration = () => {
+    setState(s => ({ ...s, activeCalibrationTarget: 'scale', activeTool: 'rect' }));
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -403,7 +425,8 @@ const App = () => {
       if (state.activeTab === 'segmentation') setState(s => ({ ...s, exclusionZones: [...s.exclusionZones, newShape], selectedShapeId: newShape.id }));
       else if (state.activeTab === 'calibration') {
         const updates: any = { selectedShapeId: newShape.id };
-        if (state.activeCalibrationTarget === 'gray') updates.calibrationROI = newShape;
+        if (state.activeCalibrationTarget === 'scale') updates.scaleROI = newShape;
+        else if (state.activeCalibrationTarget === 'gray') updates.calibrationROI = newShape;
         else if (state.activeCalibrationTarget === 'white') updates.whitePointROI = newShape;
         else updates.blackPointROI = newShape;
         setState(s => ({ ...s, ...updates }));
@@ -426,7 +449,8 @@ const App = () => {
     const update = (newP: Point[]) => {
       if (state.activeTab === 'segmentation') setState(s => ({ ...s, exclusionZones: s.exclusionZones.map(sh => sh.id === sId ? { ...sh, points: newP } : sh) }));
       else if (state.activeTab === 'calibration') {
-        if (state.calibrationROI?.id === sId) setState(s => ({ ...s, calibrationROI: { ...s.calibrationROI!, points: newP } }));
+        if (state.scaleROI?.id === sId) setState(s => ({ ...s, scaleROI: { ...s.scaleROI!, points: newP } }));
+        else if (state.calibrationROI?.id === sId) setState(s => ({ ...s, calibrationROI: { ...s.calibrationROI!, points: newP } }));
         else if (state.whitePointROI?.id === sId) setState(s => ({ ...s, whitePointROI: { ...s.whitePointROI!, points: newP } }));
         else if (state.blackPointROI?.id === sId) setState(s => ({ ...s, blackPointROI: { ...s.blackPointROI!, points: newP } }));
       } else if (state.activeTab === 'analysis') setState(s => ({ ...s, roiGroups: s.roiGroups.map(g => ({ ...g, shapes: g.shapes.map(sh => sh.id === sId ? { ...sh, points: newP } : sh) })) }));
@@ -444,13 +468,14 @@ const App = () => {
   const getSelectedShapeObj = () => {
     const sId = state.selectedShapeId;
     if (state.activeTab === 'segmentation') return state.exclusionZones.find(s => s.id === sId);
-    if (state.activeTab === 'calibration') return [state.calibrationROI, state.whitePointROI, state.blackPointROI].find(s => s?.id === sId);
+    if (state.activeTab === 'calibration') return [state.scaleROI, state.calibrationROI, state.whitePointROI, state.blackPointROI].find(s => s?.id === sId);
     let f; state.roiGroups.forEach(g => { const s = g.shapes.find(sh => sh.id === sId); if(s) f = s; }); return f;
   };
 
   const getShapeUnderCursor = (x: number, y: number) => {
     if (state.activeTab === 'segmentation') { for (const s of state.exclusionZones) if (isPointInShape(x, y, s)) return { shape: s }; }
-    else if (state.activeTab === 'calibration') { 
+    else if (state.activeTab === 'calibration') {
+      if (state.scaleROI && isPointInShape(x, y, state.scaleROI)) return { shape: state.scaleROI, type: 'scale' };
       if (state.blackPointROI && isPointInShape(x, y, state.blackPointROI)) return { shape: state.blackPointROI, type: 'black' };
       if (state.whitePointROI && isPointInShape(x, y, state.whitePointROI)) return { shape: state.whitePointROI, type: 'white' };
       if (state.calibrationROI && isPointInShape(x, y, state.calibrationROI)) return { shape: state.calibrationROI, type: 'gray' };
@@ -462,8 +487,12 @@ const App = () => {
     if (state.activeTab === 'calibration' && state.selectedShapeId) {
       const s = getSelectedShapeObj();
       if (s) {
-        const type = state.calibrationROI?.id === s.id ? 'gray' : (state.whitePointROI?.id === s.id ? 'white' : 'black');
-        calculateCalibrationFromROI(s, type as any);
+        if (state.scaleROI?.id === s.id) {
+          computeScaleFromROI(s);
+        } else {
+          const type = state.calibrationROI?.id === s.id ? 'gray' : (state.whitePointROI?.id === s.id ? 'white' : 'black');
+          calculateCalibrationFromROI(s, type as any);
+        }
       }
     }
     setDragState(null);
@@ -527,13 +556,8 @@ const App = () => {
       images.segmented = tempCanvas.toDataURL('image/png');
     }
 
-    try {
-      const ai = new GeminiClient();
-      const sum = await ai.generateReportSummary(state.roiGroups, state.regressionParams);
-      setState(s => ({ ...s, reportSummary: sum, reportImages: images, isProcessing: false }));
-    } catch { 
-      setState(s => ({ ...s, reportImages: images, isProcessing: false, reportSummary: "Bioinformatics analysis completed successfully. Observations indicate typical growth patterns." })); 
-    }
+    const sum = buildReportSummary(state.roiGroups, state.regressionParams);
+    setState(s => ({ ...s, reportSummary: sum, reportImages: images, isProcessing: false }));
   };
 
   const NavButton = ({ active, onClick, icon, label }: any) => (
@@ -628,11 +652,8 @@ const App = () => {
             {state.activeTab === 'calibration' && (
               <div className="space-y-6">
                 <div>
-                  <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 flex items-center gap-2"><Compass size={14}/> Geometric Alignment</h3>
-                  <button disabled={state.isDetectingAruco} onClick={handleDetectAruco} className="w-full flex items-center justify-center gap-2 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[10px] font-bold transition-all disabled:opacity-50">
-                    {state.isDetectingAruco ? <RefreshCw className="animate-spin" size={14}/> : <ScanLine size={14}/>} {state.isDetectingAruco ? "Finding ArUco..." : "Auto-Calibrate via ArUco"}
-                  </button>
-                  <div className="mt-4">
+                  <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 flex items-center gap-2"><RotateCw size={14}/> Geometric Alignment</h3>
+                  <div className="mt-1">
                     <div className="flex justify-between text-[10px] mb-2 text-slate-400"><span>Tilt Correction</span><span className="font-mono text-indigo-400">{state.rotationAngle.toFixed(1)}°</span></div>
                     <input type="range" min="-180" max="180" step="0.1" value={state.rotationAngle} onChange={(e) => setState(s => ({ ...s, rotationAngle: parseFloat(e.target.value) }))} className="w-full accent-indigo-500 h-1" />
                   </div>
@@ -643,11 +664,15 @@ const App = () => {
                 </div>
 
                 <div className="pt-4 border-t border-slate-800">
-                  <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 flex items-center gap-2"><Ruler size={14}/> Scale & Units</h3>
-                  <div className="grid grid-cols-2 gap-2 mb-4">
+                  <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 flex items-center gap-2"><Ruler size={14}/> Scale &amp; Units</h3>
+                  <p className="text-[10px] text-slate-400 leading-relaxed mb-3 italic">Enter the physical edge length of the Astrocalibration marker, then draw a box tightly over it to derive pixels/cm.</p>
+                  <button onClick={startScaleCalibration} className={`w-full flex items-center justify-center gap-2 py-2 rounded text-[10px] font-bold transition-all mb-4 border ${state.activeCalibrationTarget === 'scale' ? 'bg-purple-600 border-purple-400 text-white' : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'}`}>
+                    <Ruler size={14}/> {state.activeCalibrationTarget === 'scale' ? 'Draw box over marker…' : 'Set Scale from Marker'}
+                  </button>
+                  <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="text-[9px] text-slate-500 block mb-1">Marker Size (cm)</label>
-                      <input type="number" value={state.markerPhysicalSize} onChange={(e) => setState(s => ({...s, markerPhysicalSize: parseFloat(e.target.value)}))} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-xs text-white" />
+                      <input type="number" value={state.markerPhysicalSize} onChange={(e) => setState(s => ({...s, markerPhysicalSize: parseFloat(e.target.value) || 0}))} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-xs text-white" />
                     </div>
                     <div>
                       <label className="text-[9px] text-slate-500 block mb-1">Pixels / Cm</label>
@@ -809,7 +834,7 @@ const App = () => {
                   {state.isProcessing ? (
                     <div className="flex flex-col items-center gap-4 py-8">
                        <RefreshCw className="animate-spin text-slate-300" size={32} />
-                       <p className="text-sm text-slate-400 font-serif">Compiling scientific observations via Gemini LLM...</p>
+                       <p className="text-sm text-slate-400 font-serif">Compiling scientific observations from measured statistics...</p>
                     </div>
                   ) : (
                     <div className="text-sm leading-loose text-justify font-serif text-slate-800 first-letter:text-5xl first-letter:font-bold first-letter:mr-3 first-letter:float-left first-letter:text-slate-900">
@@ -839,31 +864,5 @@ const App = () => {
     </div>
   );
 };
-
-// --- Gemini Bridge ---
-
-class GeminiClient {
-  private ai: GoogleGenAI; constructor() { this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY }); }
-  async detectArucoCorners(base64: string): Promise<Point[] | null> {
-    const prompt = `Analyze the plant tray image. Locate the ArUco marker. Return the pixel coordinates for its four outer corners in clockwise order: Top-Left, Top-Right, Bottom-Right, Bottom-Left. 
-    Output strictly valid JSON with coordinates as an array of objects: [{"x": 100, "y": 100}, ...]. 
-    If multiple markers are present, detect the largest one. If none are present, return an empty array [].`;
-    try {
-      const res = await this.ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: { parts: [{ inlineData: { mimeType: 'image/jpeg', data: base64 } }, { text: prompt }] },
-        config: { responseMimeType: "application/json", responseSchema: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { x: { type: Type.NUMBER }, y: { type: Type.NUMBER } }, required: ['x','y'] } } }
-      });
-      return JSON.parse(res.text || '[]');
-    } catch { return null; }
-  }
-  async generateReportSummary(groups: ROIGroup[], r: any) {
-    const dataStr = groups.map(g => `${g.name}: Area=${g.stats?.areaCm2.toFixed(1)}cm², GI=${g.stats?.meanGI.toFixed(3)}, mACI=${g.stats?.meanMACI.toFixed(2)}`).join('; ');
-    const prompt = `You are a plant scientist writing a discussion section. Results: ${dataStr}. 
-    Analyze trends in leaf area versus photosynthetic indices (GI, NGRDI). Discuss how anthocyanin index (mACI) relates to plant stress or maturity in the sample. 
-    Write exactly 2-3 detailed paragraphs using sophisticated biological terminology. Plain text only.`;
-    try { const res = await this.ai.models.generateContent({ model: 'gemini-3-flash-preview', contents: prompt }); return res.text; } catch { return "Biometric analysis completed. Statistically significant trends observed across cohorts."; }
-  }
-}
 
 const root = createRoot(document.getElementById('root')!); root.render(<App />);

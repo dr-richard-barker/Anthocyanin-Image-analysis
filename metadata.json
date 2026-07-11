@@ -1,5 +1,5 @@
 {
-  "description": "Image Analysis Application. \nSelect he white, black and grey regions. \nThen calculate the plant vegetititve index. ",
+  "description": "Anthocyanin & Leaf Image Analysis. Browser-based tool to segment plants, calibrate colour and scale from an Astrocalibration marker, and quantify leaf area and vegetation indices (NGRDI, mACI, GI). Runs fully client-side with no AI or server dependency.",
   "requestFramePermissions": [],
-  "name": "Image Analysis Application"
+  "name": "Anthocyanin Image Analysis"
 }
