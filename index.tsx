@@ -134,10 +134,26 @@ interface DragState {
 
 // --- Constants ---
 
+// Curated demo images. The ExoLab-11 GRW08 timelapse frames contain the
+// AIRI "Astrocalibration" marker (colour chips + grayscale ramp + 0-5 cm ruler
+// + 4 ArUco corner fiducials) — ideal for demonstrating the calibration
+// workflow. The Hydra-1 frame is a germination tray for segmentation practice.
 const DEMO_IMAGES = [
-  { 
-    label: 'lettuce_tray.JPG', 
-    url: 'https://raw.githubusercontent.com/ISU-Research/Hydra1-Orbital-Greenhouse/master/Raw%20images/2018-05-27%2010-00-01.jpg' 
+  {
+    label: 'ExoLab-11 · Astrocalibration marker',
+    url: 'https://raw.githubusercontent.com/dr-richard-barker/ExoLab_11/main/grw08_images_11122024/imaging_lens_position_7.0_cam_0_1731087002.jpg'
+  },
+  {
+    label: 'ExoLab-11 · GRW08 timelapse (early)',
+    url: 'https://raw.githubusercontent.com/dr-richard-barker/ExoLab_11/main/grw08_images_11122024/imaging_lens_position_7.0_cam_0_1730496602.jpg'
+  },
+  {
+    label: 'ExoLab-11 · GRW08 timelapse (mid)',
+    url: 'https://raw.githubusercontent.com/dr-richard-barker/ExoLab_11/main/grw08_images_11122024/imaging_lens_position_7.0_cam_0_1731040202.jpg'
+  },
+  {
+    label: 'Hydra-1 · germination tray',
+    url: 'https://raw.githubusercontent.com/dr-richard-barker/Hydra1-Orbital-Greenhouse/master/Raw%20images/Ground/Img-2018-12-22%2013_48_25.492088.png'
   }
 ];
 
@@ -236,7 +252,9 @@ const App = () => {
   const [githubConfig, setGithubConfig] = useState({ token: '', owner: '', repo: '', path: 'biopheno-results' });
   const [githubStatus, setGithubStatus] = useState<'idle' | 'uploading' | 'success' | 'error'>('idle');
 
-  useEffect(() => { handleDemoLoad(DEMO_IMAGES[0].url, DEMO_IMAGES[0].label); }, []);
+  useEffect(() => {
+    setState(s => ({ ...s, gallery: DEMO_IMAGES.map((d, i) => ({ id: `demo-${i}`, name: d.label, url: d.url })), activeImageIndex: 0 }));
+  }, []);
 
   useEffect(() => {
     if (!state.gallery[state.activeImageIndex]) return;
@@ -511,7 +529,10 @@ const App = () => {
     else setState(s => ({ ...s, blackPointColor: color }));
   };
 
-  const handleDemoLoad = (url: string, label: string) => { setState(s => ({ ...s, gallery: [{ id: 'demo', name: label, url }], activeImageIndex: 0 })); };
+  // Append an uploaded image to the gallery and switch to it (keeps demos available).
+  const handleImageUpload = (url: string, label: string) => {
+    setState(s => ({ ...s, gallery: [...s.gallery, { id: `upload-${s.gallery.length}`, name: label, url }], activeImageIndex: s.gallery.length }));
+  };
 
   const handleGenerateReport = async () => {
     if (!loadedImageRef.current) return;
@@ -603,6 +624,18 @@ const App = () => {
               )}
             </div>
             <div className="flex items-center gap-3">
+               {state.gallery.length > 0 && (
+                 <select
+                   value={state.activeImageIndex}
+                   onChange={(e) => setState(s => ({ ...s, activeImageIndex: parseInt(e.target.value) }))}
+                   title="Load a demo image or a previous upload"
+                   className="bg-slate-800 border border-slate-700 rounded text-[11px] text-slate-200 px-2 py-2 max-w-[220px] focus:outline-none focus:border-emerald-500"
+                 >
+                   {state.gallery.map((g, i) => (
+                     <option key={g.id} value={i}>{g.name}</option>
+                   ))}
+                 </select>
+               )}
                <div className="flex items-center bg-slate-800 rounded border border-slate-700 px-2 py-1">
                   <button onClick={() => setState(s => ({...s, zoom: s.zoom*0.8}))} className="hover:text-white text-slate-400"><ZoomOut size={14}/></button>
                   <span className="text-[10px] w-12 text-center font-mono">{(state.zoom*100).toFixed(0)}%</span>
@@ -610,7 +643,7 @@ const App = () => {
                   <button className="ml-2 hover:text-white text-slate-400" onClick={fitImageToScreen}><Minimize size={14}/></button>
                </div>
                <button onClick={() => document.getElementById('f-in')?.click()} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm font-medium transition-colors">Upload</button>
-               <input id="f-in" type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if(f) handleDemoLoad(URL.createObjectURL(f), f.name); }} />
+               <input id="f-in" type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if(f) handleImageUpload(URL.createObjectURL(f), f.name); }} />
             </div>
           </header>
         )}

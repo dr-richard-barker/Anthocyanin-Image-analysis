@@ -42,7 +42,8 @@ produce the same numbers, which matters for reproducible science.
 
 ## Using the tool — a typical workflow
 
-The app opens with a demo plant-tray image; use **Upload** (top right) to load your own.
+The app opens with a set of **demo images** (pick from the dropdown, top right) — including
+ExoLab-11 frames that contain the Astrocalibration marker — or use **Upload** to load your own.
 Work left-to-right through the sidebar tabs:
 
 1. **Segmentation** — drag the **ExG Threshold** slider until the green overlay covers the
@@ -128,9 +129,14 @@ and colour reference.
 - [ ] **Leaf Area Index (LAI)** mode for whole-canopy / plot images (fractional green cover → LAI estimate).
 
 ### 🎯 Astrocalibration marker
-- [ ] Define and document the **Astrocalibration** marker spec (dimensions, colour patches, fiducial pattern) as a printable PDF/SVG in this repo.
-- [ ] **Automatic marker detection** (pure-JS fiducial detection, e.g. js-aruco2 / a small corner detector) to recover scale *and* rotation without manual boxing — restoring the old auto-calibration, offline.
-- [ ] Use the marker's embedded colour patches to drive white/grey/black colour calibration in one step.
+Full design + PlantCV interoperability write-up: **[docs/astrocalibration.md](docs/astrocalibration.md)**.
+The marker is the AIRI *Bio Imaging Spectrum 5 cm* sticker ([order here](https://www.stickermule.com/drb2025/item/19181049)):
+4 corner ArUco fiducials + colour chips + grayscale ramp + 0–5 cm ruler.
+- [x] Bundle demo images that contain the marker (ExoLab-11 GRW08 timelapse) + a segmentation example (Hydra-1).
+- [ ] Hard-code the 15-chip `astro_color_matrix()` standard and apply **affine colour correction** (PlantCV-equivalent) in the canvas pipeline.
+- [ ] **Automatic marker detection** via the 4 ArUco fiducials (pure-JS, e.g. js-aruco2) to recover scale *and* rotation without manual boxing — offline auto-calibration.
+- [ ] Print/document the marker chip-layout spec as an SVG/PDF in this repo.
+- [ ] Optional "PlantCV pro" Colab notebook sharing the same marker standard.
 
 ### 🎓 AIRI education integration
 - [ ] Package as an embeddable module / iframe for AIRI lesson pages.
