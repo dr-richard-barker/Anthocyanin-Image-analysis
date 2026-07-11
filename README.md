@@ -1,5 +1,9 @@
 # Anthocyanin & Leaf Image Analysis
 
+### ▶ Use it now: **[dr-richard-barker.github.io/Anthocyanin-Image-analysis](https://dr-richard-barker.github.io/Anthocyanin-Image-analysis/)**
+
+No install required — it runs entirely in your browser.
+
 A browser-based image-analysis tool for plant phenotyping. Upload a photo of a
 plant tray, rosette, or leaf; segment the vegetation; calibrate colour and
 physical scale; and quantify **leaf area** and **vegetation / pigment indices**
@@ -33,6 +37,32 @@ produce the same numbers, which matters for reproducible science.
 - **NGRDI** = (G − R) / (G + R) — normalised green-red difference; greenness / vigour proxy.
 - **mACI** = R / G — modified anthocyanin content index; higher = more red/anthocyanin (stress / maturity).
 - **GI** = G / (R + G + B) — green fraction.
+
+---
+
+## Using the tool — a typical workflow
+
+The app opens with a demo plant-tray image; use **Upload** (top right) to load your own.
+Work left-to-right through the sidebar tabs:
+
+1. **Segmentation** — drag the **ExG Threshold** slider until the green overlay covers the
+   plant and nothing else. Use the shape tools (rectangle / circle / lasso) to draw
+   **exclusion zones** over soil, labels, pots, or reflections you want ignored.
+2. **Calibration & Units**
+   - *Scale:* enter the physical **edge length (cm)** of your Astrocalibration marker, click
+     **Set Scale from Marker**, then drag a box tightly over the marker. The tool derives
+     **pixels/cm** so areas report in **cm²**. (Skip this and areas report in pixels.)
+   - *Colour:* pick the **grey / white / black** target and draw a box over the matching
+     reference patch to white-balance the image before indices are computed.
+   - *Geometry:* nudge the **Tilt** and **Lens** sliders if the image is rotated or distorted.
+3. **Results** — draw one or more ROIs to create **analysis groups** (cohorts). Each group
+   reports area, NGRDI, mACI, and Green Index. Rename or add groups in the sidebar, and
+   switch the canvas between **RGB / NGRDI / mACI / GI** overlays.
+4. **Generate Report** — produces a printable page with the calibrated image, segmentation
+   mask, index montages, a statistics table, and a written summary. Use **Print / PDF** to save.
+
+> Tip: all processing is local — nothing is uploaded — so it is safe to use on unpublished
+> research imagery.
 
 ---
 
