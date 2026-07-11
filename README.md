@@ -135,12 +135,12 @@ and colour reference.
 Full design + PlantCV interoperability write-up: **[docs/astrocalibration.md](docs/astrocalibration.md)**.
 The marker is the AIRI *Bio Imaging Spectrum 5 cm* sticker ([order here](https://www.stickermule.com/drb2025/item/19181049)):
 4 corner ArUco fiducials + colour chips + grayscale ramp + 0–5 cm ruler.
-- [x] Bundle demo images that contain the marker (ExoLab-11 GRW08 timelapse) + a segmentation example (Hydra-1).
-- [x] Hard-code the 15-chip `astro_color_matrix()` standard and apply **affine colour correction** (PlantCV-equivalent) in the canvas pipeline ([`colorcalib.ts`](colorcalib.ts)).
-- [x] **Automatic marker detection** via the 4 ArUco fiducials (pure-JS `js-aruco2`) → auto scale + colour correction, with draggable corners + a live residual readout. See **[Detect Marker]** in Calibration & Units.
+- [x] Bundle demo images: a clean well-exposed marker (Medicago ground control), two colour morphs (fast plants), plus the ExoLab-11 timelapse and a Hydra-1 segmentation example.
+- [x] Hard-code the 15-chip `astro_color_matrix()` standard and apply **affine colour correction** (PlantCV-equivalent) in the canvas pipeline ([`colorcalib.ts`](colorcalib.ts)), with draggable corners + a live residual readout.
+- [x] **[PlantCV Pro notebook](notebooks/plantcv_pro_astrocalibration.ipynb)** — the robust automated path (geometric fiducial detection → `affine_color_correction` → segmentation → CSV), sharing the same 15-chip standard.
+- [ ] **Reliable in-browser marker detection.** Generic ArUco/AprilTag decoders (js-aruco2, all 19 dictionaries) do **not** reliably read the Astrobotany *custom-icon* fiducials — 0 detections on a clean photo, false partials elsewhere. Browser colour correction therefore uses **assisted manual corner placement** (drag the 4 handles onto the fiducials); full auto-detection lives in the notebook. Porting the notebook's contour-based fiducial detector to JS is the fix.
 - [ ] Perspective homography + auto-rotation from the fiducials (currently bilinear + manual tilt).
 - [ ] Print/document the marker chip-layout spec as an SVG/PDF in this repo.
-- [ ] Optional "PlantCV pro" Colab notebook sharing the same marker standard.
 
 ### 🎓 AIRI education integration
 - [ ] Package as an embeddable module / iframe for AIRI lesson pages.

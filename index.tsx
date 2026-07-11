@@ -145,13 +145,22 @@ interface DragState {
 
 // --- Constants ---
 
-// Curated demo images. The ExoLab-11 GRW08 timelapse frames contain the
-// AIRI "Astrocalibration" marker (colour chips + grayscale ramp + 0-5 cm ruler
-// + 4 ArUco corner fiducials) — ideal for demonstrating the calibration
-// workflow. The Hydra-1 frame is a germination tray for segmentation practice.
+// Curated demo images. The Medicago frame has a clean, well-exposed
+// Astrocalibration marker (best for the colour-correction workflow). The
+// fast-plants frame shows two colour morphs for colour-distinction demos. The
+// ExoLab-11 GRW08 timelapse frames also carry the marker; the Hydra-1 frame is
+// a germination tray for segmentation practice.
 const DEMO_IMAGES = [
   {
-    label: 'ExoLab-11 · Astrocalibration marker',
+    label: 'Medicago ground control · clean marker',
+    url: 'demos/medicago_marker.jpg'
+  },
+  {
+    label: 'Fast plants · two colour morphs',
+    url: 'demos/fastplants_colour.jpg'
+  },
+  {
+    label: 'ExoLab-11 · marker (glary)',
     url: 'https://raw.githubusercontent.com/dr-richard-barker/ExoLab_11/main/grw08_images_11122024/imaging_lens_position_7.0_cam_0_1731115802.jpg'
   },
   {
@@ -487,22 +496,37 @@ const App = () => {
     setState(s => ({ ...s, colorMatrix: fit.matrix, colorResidual: fit.residual, colorCorrectionEnabled: true }));
   };
 
+  // A centred landscape quad (~card aspect) to seed manual placement when
+  // auto-detection can't find the fiducials (common: the Astrobotany markers use
+  // custom icons that generic ArUco decoders don't read).
+  const defaultQuad = (w: number, h: number): Pt[] => {
+    const cw = w * 0.4, ch = cw / 1.3, cx = w / 2, cy = h / 2;
+    return [
+      { x: cx - cw / 2, y: cy - ch / 2 }, { x: cx + cw / 2, y: cy - ch / 2 },
+      { x: cx + cw / 2, y: cy + ch / 2 }, { x: cx - cw / 2, y: cy + ch / 2 },
+    ];
+  };
+
   const handleDetectMarker = async () => {
     const raw = rawImageData(); if (!raw) return;
     setState(s => ({ ...s, isDetectingMarker: true, activeCalibrationTarget: 'astro' }));
-    const { corners, found } = await detectMarkerCorners(raw.data, raw.w, raw.h);
-    if (!corners) {
-      setState(s => ({ ...s, isDetectingMarker: false, markerFound: 0 }));
-      alert('No Astrocalibration marker detected automatically. Draw the 4 corners by dragging the purple handles, or use manual white/grey/black calibration.');
-      return;
-    }
-    const { pxPerCm } = scaleAndRotation(corners);
+    const det = await detectMarkerCorners(raw.data, raw.w, raw.h);
+    // Only trust a clean 4-fiducial detection. Generic ArUco decoders give
+    // unreliable partial/false matches on these custom markers, so for anything
+    // less we seed a predictable centred quad for the user to place by hand.
+    const trusted = det.corners && det.found >= 4;
+    const corners = trusted ? det.corners! : defaultQuad(raw.w, raw.h);
     const fit = fitFromQuad(raw.data, raw.w, raw.h, corners);
+    const { pxPerCm } = scaleAndRotation(corners);
     setState(s => ({
-      ...s, markerCorners: corners, markerFound: found, isDetectingMarker: false,
-      colorMatrix: fit.matrix, colorResidual: fit.residual, colorCorrectionEnabled: true,
-      pixelsPerCm: pxPerCm > 0 && isFinite(pxPerCm) ? pxPerCm : s.pixelsPerCm,
+      ...s, markerCorners: corners, markerFound: det.found, isDetectingMarker: false,
+      colorMatrix: fit.matrix, colorResidual: fit.residual,
+      colorCorrectionEnabled: trusted,
+      pixelsPerCm: trusted && pxPerCm > 0 && isFinite(pxPerCm) ? pxPerCm : s.pixelsPerCm,
     }));
+    if (!trusted) {
+      alert('Auto-detect isn’t reliable for the Astrobotany marker (custom fiducial icons). Drag the four purple corner handles onto the marker’s corner squares — TL on the ASTROBOTANY / plus corner — then tick “Apply colour correction”.');
+    }
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -785,9 +809,9 @@ const App = () => {
               <div className="space-y-6">
                 <div>
                   <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 flex items-center gap-2"><ScanLine size={14}/> Astrocalibration Marker</h3>
-                  <p className="text-[10px] text-slate-400 leading-relaxed mb-3 italic">Auto-detect the AIRI marker for one-step colour correction + scale. Then drag the purple corner handles to fine-tune, and watch the fit residual.</p>
+                  <p className="text-[10px] text-slate-400 leading-relaxed mb-3 italic">Colour-correct against the AIRI marker. Auto-detect is attempted; the Astrobotany fiducials use custom icons, so you'll usually drag the 4 corner handles onto the marker's corner squares yourself. For fully automatic batch processing use the <b>PlantCV Pro notebook</b>.</p>
                   <button disabled={state.isDetectingMarker} onClick={handleDetectMarker} className="w-full flex items-center justify-center gap-2 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded text-[10px] font-bold transition-all mb-3">
-                    {state.isDetectingMarker ? <RefreshCw className="animate-spin" size={14}/> : <ScanLine size={14}/>} {state.isDetectingMarker ? 'Detecting…' : 'Detect Marker (colour + scale)'}
+                    {state.isDetectingMarker ? <RefreshCw className="animate-spin" size={14}/> : <ScanLine size={14}/>} {state.isDetectingMarker ? 'Detecting…' : 'Detect / place marker'}
                   </button>
                   {state.markerCorners && (
                     <div className="space-y-2">
@@ -797,9 +821,9 @@ const App = () => {
                       </label>
                       <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
                         <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">Fiducials <span className="text-purple-300">{state.markerFound}/4</span></div>
-                        <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">Residual <span className={state.colorResidual != null && state.colorResidual < 0.08 ? 'text-emerald-400' : 'text-amber-400'}>{state.colorResidual != null ? state.colorResidual.toFixed(3) : '-'}</span></div>
+                        <div className="bg-slate-950 p-2 rounded border border-slate-800 text-slate-400">Residual <span className={state.colorResidual != null && state.colorResidual < 0.13 ? 'text-emerald-400' : 'text-amber-400'}>{state.colorResidual != null ? state.colorResidual.toFixed(3) : '-'}</span></div>
                       </div>
-                      <p className="text-[9px] text-slate-500 leading-relaxed">Lower residual = better fit. If the pink chip dots don't sit on the marker's colour patches, drag the corner handles to align them. Over-exposed markers fit poorly.</p>
+                      <p className="text-[9px] text-slate-500 leading-relaxed">Drag the 4 purple handles onto the marker's corner fiducials — <b>TL on the ASTROBOTANY / plus corner</b> — so the pink dots land on the colour patches. Lower residual = better fit (~0.12 is typical for a good print; over-exposed markers fit worse).</p>
                     </div>
                   )}
                 </div>

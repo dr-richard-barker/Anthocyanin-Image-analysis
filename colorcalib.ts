@@ -19,24 +19,28 @@ export interface Pt { x: number; y: number; }
 // quad corners to fit their own photo.
 export interface AstroChip { id: number; u: number; v: number; std: [number, number, number]; name: string; }
 
+// Canonical LANDSCAPE orientation (marker held with ASTROBOTANY.COM at the top):
+// a horizontal colour row over a horizontal grayscale ramp. u,v measured from a
+// clean, flat reference photo. Place the corner handles so TL is the top-left
+// fiducial (by the "ASTROBOTANY.COM"/plus icon) and the layout maps correctly.
 export const ASTRO_CHIPS: AstroChip[] = [
-  // solid colour column
-  { id: 10, u: 0.55, v: 0.06, std: [0.18, 0.23, 0.50], name: 'blue' },
-  { id: 20, u: 0.55, v: 0.27, std: [0.34, 0.62, 0.25], name: 'green' },
-  { id: 30, u: 0.54, v: 0.52, std: [0.71, 0.25, 0.21], name: 'red' },
-  { id: 40, u: 0.52, v: 0.75, std: [0.89, 0.81, 0.20], name: 'yellow' },
-  { id: 50, u: 0.51, v: 0.98, std: [0.21, 0.22, 0.22], name: 'near-black' },
-  // grayscale ramp (white -> dark), sits just left of the colour column
-  { id: 60, u: 0.45, v: 0.10, std: [0.91, 0.95, 0.93], name: 'gray-0' },
-  { id: 70, u: 0.445, v: 0.19, std: [0.82, 0.86, 0.86], name: 'gray-1' },
-  { id: 80, u: 0.44, v: 0.28, std: [0.72, 0.75, 0.73], name: 'gray-2' },
-  { id: 90, u: 0.435, v: 0.37, std: [0.64, 0.67, 0.64], name: 'gray-3' },
-  { id: 100, u: 0.43, v: 0.46, std: [0.57, 0.58, 0.56], name: 'gray-4' },
-  { id: 110, u: 0.425, v: 0.54, std: [0.48, 0.49, 0.48], name: 'gray-5' },
-  { id: 120, u: 0.42, v: 0.63, std: [0.39, 0.40, 0.39], name: 'gray-6' },
-  { id: 130, u: 0.415, v: 0.72, std: [0.33, 0.32, 0.32], name: 'gray-7' },
-  { id: 140, u: 0.41, v: 0.81, std: [0.27, 0.28, 0.27], name: 'gray-8' },
-  { id: 150, u: 0.405, v: 0.90, std: [0.22, 0.23, 0.23], name: 'gray-9' },
+  // colour row (left -> right)
+  { id: 10, u: 0.110, v: 0.50, std: [0.18, 0.23, 0.50], name: 'blue' },
+  { id: 20, u: 0.279, v: 0.50, std: [0.34, 0.62, 0.25], name: 'green' },
+  { id: 30, u: 0.493, v: 0.50, std: [0.71, 0.25, 0.21], name: 'red' },
+  { id: 40, u: 0.711, v: 0.50, std: [0.89, 0.81, 0.20], name: 'yellow' },
+  { id: 50, u: 0.890, v: 0.50, std: [0.21, 0.22, 0.22], name: 'near-black' },
+  // grayscale ramp (white -> dark), left -> right, one row below the colours
+  { id: 60, u: 0.130, v: 0.61, std: [0.91, 0.95, 0.93], name: 'gray-0' },
+  { id: 70, u: 0.212, v: 0.61, std: [0.82, 0.86, 0.86], name: 'gray-1' },
+  { id: 80, u: 0.294, v: 0.61, std: [0.72, 0.75, 0.73], name: 'gray-2' },
+  { id: 90, u: 0.377, v: 0.61, std: [0.64, 0.67, 0.64], name: 'gray-3' },
+  { id: 100, u: 0.459, v: 0.61, std: [0.57, 0.58, 0.56], name: 'gray-4' },
+  { id: 110, u: 0.541, v: 0.61, std: [0.48, 0.49, 0.48], name: 'gray-5' },
+  { id: 120, u: 0.623, v: 0.61, std: [0.39, 0.40, 0.39], name: 'gray-6' },
+  { id: 130, u: 0.706, v: 0.61, std: [0.33, 0.32, 0.32], name: 'gray-7' },
+  { id: 140, u: 0.788, v: 0.61, std: [0.27, 0.28, 0.27], name: 'gray-8' },
+  { id: 150, u: 0.870, v: 0.61, std: [0.22, 0.23, 0.23], name: 'gray-9' },
 ];
 
 // Physical distance between opposite corner-marker centres on the 5 cm card.
