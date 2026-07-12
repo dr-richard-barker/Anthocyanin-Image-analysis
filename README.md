@@ -64,6 +64,9 @@ Work left-to-right through the sidebar tabs:
    switch the canvas between **RGB / NGRDI / mACI / GI** overlays.
 4. **Generate Report** — produces a printable page with the calibrated image, segmentation
    mask, index montages, a statistics table, and a written summary. Use **Print / PDF** to save.
+5. **Export / batch** — **Download all as CSV** for the current image, or under **Batch processing**
+   reuse the current ROIs + calibration across many frames (upload your own, or one click over the
+   ExoLab-11 timelapse) to get one combined CSV. Draw the ROIs on a representative frame first.
 
 > Tip: all processing is local — nothing is uploaded — so it is safe to use on unpublished
 > research imagery.
@@ -124,8 +127,8 @@ and colour reference.
 - [x] Strip API-key config; the app builds and runs with zero secrets.
 
 ### 🔜 Near term — Make it a dependable measurement tool
-- [ ] **CSV / JSON export** of per-cohort statistics (currently report + on-screen only).
-- [ ] **Batch mode**: process a folder / gallery of images with shared calibration and combined output.
+- [x] **CSV export** of per-cohort statistics ("Download all as CSV" in Results / the report).
+- [x] **Batch mode**: reuse the current ROIs + calibration across many frames (upload your own, or one click over the ExoLab-11 GRW08 timelapse) → one combined CSV.
 - [ ] **Persist sessions** (ROIs, calibration, settings) to `localStorage` and to a downloadable project file.
 - [ ] **Pixel-accurate ROI masking** — replace bounding-box hit-tests in the stats loop with true per-pixel shape containment for lasso/circle groups.
 - [ ] **Rosette-aware metrics**: convex-hull area, compactness, and per-leaf counts for Arabidopsis-style rosettes.

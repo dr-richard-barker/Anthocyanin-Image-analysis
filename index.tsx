@@ -316,6 +316,79 @@ const THRESHOLD_FNS: Record<ThresholdMethod, (h: number[]) => number> = {
   otsu: otsuThreshold, triangle: triangleThreshold, isodata: isodataThreshold, mean: meanThreshold,
 };
 
+// --- Per-group statistics (shared by the live pipeline and batch processing) ---
+
+interface GroupStat {
+  name: string; pixelCount: number; areaCm2: number;
+  meanNGRDI: number; meanMACI: number; meanGI: number; anthocyanin: number;
+  meanR: number; meanG: number; meanB: number;
+}
+interface StatsConfig {
+  roiGroups: ROIGroup[]; exclusionZones: Shape[]; segmentationThreshold: number;
+  colorCorrectionEnabled: boolean; colorMatrix: number[][] | null;
+  whitePointColor: { r: number; g: number; b: number } | null;
+  calibrationColor: { r: number; g: number; b: number } | null;
+  pixelsPerCm: number | null;
+  regressionParams: { slope: number; intercept: number; targetIndex: 'mACI' | 'NGRDI' };
+}
+
+// Compute per-ROI-group statistics for one image using the same segmentation +
+// index maths as the live pipeline. Used for batch processing.
+const computeGroupStats = (data: Uint8ClampedArray, w: number, h: number, cfg: StatsConfig): GroupStat[] => {
+  if (cfg.colorCorrectionEnabled && cfg.colorMatrix) applyAffineToImageData(data, cfg.colorMatrix);
+  let rS = 1, gS = 1, bS = 1;
+  if (!(cfg.colorCorrectionEnabled && cfg.colorMatrix)) {
+    if (cfg.whitePointColor) { rS = 255 / cfg.whitePointColor.r; gS = 255 / cfg.whitePointColor.g; bS = 255 / cfg.whitePointColor.b; }
+    else if (cfg.calibrationColor) { rS = 128 / cfg.calibrationColor.r; gS = 128 / cfg.calibrationColor.g; bS = 128 / cfg.calibrationColor.b; }
+  }
+  const exZones = cfg.exclusionZones.map(s => ({ s, bb: getBoundingBox(s) }));
+  const groupBoxes = cfg.roiGroups.map(g => g.shapes.map(s => ({ s, bb: getBoundingBox(s) })));
+  const acc = cfg.roiGroups.map(() => ({ n: 0, sNG: 0, sMA: 0, sGI: 0, sR: 0, sG: 0, sB: 0 }));
+  for (let i = 0; i < data.length; i += 4) {
+    const p = i >> 2, x = p % w, y = (p / w) | 0;
+    const r = Math.min(255, data[i] * rS), g = Math.min(255, data[i + 1] * gS), b = Math.min(255, data[i + 2] * bS);
+    if ((2 * g - r - b) <= cfg.segmentationThreshold) continue;
+    let excluded = false;
+    for (const z of exZones) { const bb = z.bb; if (x >= bb.minX && x <= bb.maxX && y >= bb.minY && y <= bb.maxY && isPointInShape(x, y, z.s)) { excluded = true; break; } }
+    if (excluded) continue;
+    const ngrdi = (g + r) === 0 ? 0 : (g - r) / (g + r);
+    const maci = g === 0 ? 0 : r / g;
+    const gi = (r + g + b) === 0 ? 0 : g / (r + g + b);
+    for (let k = 0; k < groupBoxes.length; k++) {
+      let inG = false;
+      for (const sh of groupBoxes[k]) { const bb = sh.bb; if (x >= bb.minX && x <= bb.maxX && y >= bb.minY && y <= bb.maxY && isPointInShape(x, y, sh.s)) { inG = true; break; } }
+      if (inG) { const a = acc[k]; a.n++; a.sNG += ngrdi; a.sMA += maci; a.sGI += gi; a.sR += r; a.sG += g; a.sB += b; }
+    }
+  }
+  const cm2 = cfg.pixelsPerCm ? 1 / (cfg.pixelsPerCm * cfg.pixelsPerCm) : 0;
+  return cfg.roiGroups.map((grp, i) => {
+    const a = acc[i], c = a.n || 1;
+    const mMaci = a.sMA / c, mNgrdi = a.sNG / c, mGi = a.sGI / c;
+    const antho = cfg.regressionParams.slope * (cfg.regressionParams.targetIndex === 'mACI' ? mMaci : mNgrdi) + cfg.regressionParams.intercept;
+    return { name: grp.name, pixelCount: a.n, areaCm2: a.n * cm2, meanNGRDI: mNgrdi, meanMACI: mMaci, meanGI: mGi, anthocyanin: antho, meanR: a.sR / c, meanG: a.sG / c, meanB: a.sB / c };
+  });
+};
+
+// --- CSV helpers (shared by single-image + batch export) ---
+const CSV_HEADERS = ['image', 'group', 'pixel_count', 'area_cm2', 'mean_NGRDI', 'mean_mACI', 'mean_GI',
+  'est_anthocyanin', 'mean_R', 'mean_G', 'mean_B', 'px_per_cm', 'exg_threshold', 'colour_residual', 'anthocyanin_model'];
+interface CsvCtx { pxPerCm: number | null; exgThreshold: number; colourResidual: number | null; model: string; }
+const csvEscape = (v: any) => { const s = String(v ?? ''); return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+const statToRow = (image: string, st: GroupStat, ctx: CsvCtx) => [
+  image, st.name, st.pixelCount,
+  st.areaCm2.toFixed(4), st.meanNGRDI.toFixed(5), st.meanMACI.toFixed(5), st.meanGI.toFixed(5),
+  st.anthocyanin.toFixed(5), st.meanR.toFixed(2), st.meanG.toFixed(2), st.meanB.toFixed(2),
+  ctx.pxPerCm ? ctx.pxPerCm.toFixed(2) : '', ctx.exgThreshold,
+  ctx.colourResidual != null ? ctx.colourResidual.toFixed(4) : '', ctx.model,
+];
+const buildCsvText = (rows: any[][]) => [CSV_HEADERS, ...rows].map(r => r.map(csvEscape).join(',')).join('\r\n');
+const triggerDownload = (text: string, filename: string) => {
+  const blob = new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+};
+
 // --- Main App ---
 
 const App = () => {
@@ -340,6 +413,8 @@ const App = () => {
   const stateRef = useRef(state); stateRef.current = state; // always the latest state
   const historyRef = useRef<Partial<AppState>[]>([]);
   const [historyLen, setHistoryLen] = useState(0);
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; running: boolean; label: string } | null>(null);
+  const [batchStride, setBatchStride] = useState(20);
   const SNAP_KEYS: (keyof AppState)[] = [
     'roiGroups', 'exclusionZones', 'activeGroupId', 'selectedShapeId', 'segmentationThreshold',
     'calibrationColor', 'calibrationROI', 'whitePointColor', 'whitePointROI', 'blackPointColor', 'blackPointROI',
@@ -397,41 +472,87 @@ const App = () => {
     setState(s => ({ ...s, segmentationThreshold: t }));
   };
 
-  // Export every ROI group's statistics (plus calibration context) as a CSV.
+  const csvCtx = (s: AppState): CsvCtx => ({
+    pxPerCm: s.pixelsPerCm, exgThreshold: s.segmentationThreshold, colourResidual: s.colorResidual,
+    model: `${s.regressionParams.slope}*${s.regressionParams.targetIndex}+${s.regressionParams.intercept}`,
+  });
+
+  // Export the current image's ROI-group statistics as a CSV.
   const downloadCSV = () => {
     const s = stateRef.current;
     if (!s.roiGroups.length) return;
     const img = s.gallery[s.activeImageIndex]?.name || 'image';
-    const model = `${s.regressionParams.slope}*${s.regressionParams.targetIndex}+${s.regressionParams.intercept}`;
-    const esc = (v: any) => { const str = String(v ?? ''); return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str; };
-    const headers = ['image', 'group', 'pixel_count', 'area_cm2', 'mean_NGRDI', 'mean_mACI', 'mean_GI',
-      'est_anthocyanin', 'mean_R', 'mean_G', 'mean_B', 'px_per_cm', 'exg_threshold', 'colour_residual', 'anthocyanin_model'];
+    const ctx = csvCtx(s);
     const rows = s.roiGroups.map(g => {
       const st = g.stats, c = st?.pixelCount || 0;
-      return [
-        img, g.name, c,
-        st ? st.areaCm2.toFixed(4) : '',
-        st ? st.meanNGRDI.toFixed(5) : '',
-        st ? st.meanMACI.toFixed(5) : '',
-        st ? st.meanGI.toFixed(5) : '',
-        st ? st.anthocyanin.toFixed(5) : '',
-        st && c ? (st.sumR / c).toFixed(2) : '',
-        st && c ? (st.sumG / c).toFixed(2) : '',
-        st && c ? (st.sumB / c).toFixed(2) : '',
-        s.pixelsPerCm ? s.pixelsPerCm.toFixed(2) : '',
-        s.segmentationThreshold,
-        s.colorResidual != null ? s.colorResidual.toFixed(4) : '',
-        model,
-      ];
+      const gs: GroupStat = {
+        name: g.name, pixelCount: c, areaCm2: st?.areaCm2 || 0,
+        meanNGRDI: st?.meanNGRDI || 0, meanMACI: st?.meanMACI || 0, meanGI: st?.meanGI || 0, anthocyanin: st?.anthocyanin || 0,
+        meanR: c ? st!.sumR / c : 0, meanG: c ? st!.sumG / c : 0, meanB: c ? st!.sumB / c : 0,
+      };
+      return statToRow(img, gs, ctx);
     });
-    const csv = [headers, ...rows].map(r => r.map(esc).join(',')).join('\r\n');
-    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `phenotype_${img.replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_')}.csv`;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
+    triggerDownload(buildCsvText(rows), `phenotype_${img.replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_')}.csv`);
+  };
+
+  // --- Batch processing: apply the current ROIs + calibration to many images ---
+  const loadImageData = (url: string) => new Promise<{ data: Uint8ClampedArray; w: number; h: number } | null>(resolve => {
+    const img = new Image(); img.crossOrigin = 'Anonymous';
+    img.onload = () => {
+      const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+      const cx = c.getContext('2d', { willReadFrequently: true });
+      if (!cx) { resolve(null); return; }
+      cx.drawImage(img, 0, 0);
+      resolve({ data: cx.getImageData(0, 0, img.width, img.height).data, w: img.width, h: img.height });
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+
+  const runBatch = async (sources: { name: string; url: string }[]) => {
+    const s = stateRef.current;
+    if (!s.roiGroups.length) { alert('Draw at least one ROI group on a reference frame first — batch reuses those regions and your calibration on every image.'); return; }
+    if (!sources.length) { setBatchProgress(null); return; }
+    const cfg: StatsConfig = {
+      roiGroups: s.roiGroups, exclusionZones: s.exclusionZones, segmentationThreshold: s.segmentationThreshold,
+      colorCorrectionEnabled: s.colorCorrectionEnabled, colorMatrix: s.colorMatrix,
+      whitePointColor: s.whitePointColor, calibrationColor: s.calibrationColor,
+      pixelsPerCm: s.pixelsPerCm, regressionParams: s.regressionParams,
+    };
+    const ctx = csvCtx(s);
+    const rows: any[][] = [];
+    for (let i = 0; i < sources.length; i++) {
+      setBatchProgress({ done: i, total: sources.length, running: true, label: sources[i].name });
+      const im = await loadImageData(sources[i].url);
+      if (im) computeGroupStats(im.data, im.w, im.h, cfg).forEach(st => rows.push(statToRow(sources[i].name, st, ctx)));
+      else rows.push([sources[i].name, 'LOAD_ERROR', '', '', '', '', '', '', '', '', '', '', ctx.exgThreshold, '', ctx.model]);
+      await new Promise(r => setTimeout(r, 0)); // let the UI/progress paint
+    }
+    setBatchProgress({ done: sources.length, total: sources.length, running: false, label: 'Done' });
+    triggerDownload(buildCsvText(rows), `phenotype_batch_${sources.length}images.csv`);
+  };
+
+  // Fetch the ExoLab-11 GRW08 timelapse frame list and batch-process a sampled subset.
+  const runExolabBatch = async () => {
+    if (!stateRef.current.roiGroups.length) { alert('Load an ExoLab frame, draw ROI group(s) + set your threshold/calibration, then run the batch — it reuses them on every frame.'); return; }
+    setBatchProgress({ done: 0, total: 0, running: true, label: 'Fetching ExoLab frame list…' });
+    try {
+      const res = await fetch('https://api.github.com/repos/dr-richard-barker/ExoLab_11/contents/grw08_images_11122024');
+      const files = await res.json();
+      if (!Array.isArray(files)) throw new Error('bad list');
+      const frames = files.filter((f: any) => /^imaging_lens.*\.jpg$/i.test(f.name)).sort((a: any, b: any) => a.name.localeCompare(b.name));
+      const stride = Math.max(1, batchStride | 0);
+      const sampled = frames.filter((_: any, i: number) => i % stride === 0).map((f: any) => ({ name: f.name, url: f.download_url as string }));
+      await runBatch(sampled);
+    } catch {
+      setBatchProgress(null);
+      alert('Could not fetch the ExoLab frame list (GitHub API / network). You can still batch your own images with “Add images”.');
+    }
+  };
+
+  const onBatchFiles = (files: FileList | null) => {
+    if (!files || !files.length) return;
+    runBatch([...files].map(f => ({ name: f.name, url: URL.createObjectURL(f) })));
   };
 
   useEffect(() => {
@@ -1145,6 +1266,35 @@ const App = () => {
                     <p className="text-[9px] text-slate-500 leading-relaxed mt-2 italic">One row per region group — area, NGRDI, mACI, GI, estimated anthocyanin, mean RGB, plus calibration context.</p>
                   </div>
                 )}
+
+                <div className="pt-4 border-t border-slate-800">
+                  <h3 className="text-xs font-bold text-slate-500 uppercase mb-2 flex items-center gap-2"><FlaskConical size={12}/> Batch processing</h3>
+                  <p className="text-[9px] text-slate-500 leading-relaxed mb-3">Apply the <b>current ROIs, threshold and calibration</b> to many frames (e.g. a timelapse) and download one combined CSV. Best when the images share the camera framing of the reference frame.</p>
+                  {batchProgress ? (
+                    <div className="text-[10px] text-slate-300 bg-slate-950 border border-slate-800 rounded p-3">
+                      <div className="flex justify-between mb-1"><span>{batchProgress.running ? 'Processing…' : 'Complete'}</span><span className="font-mono text-emerald-400">{batchProgress.done}/{batchProgress.total || '?'}</span></div>
+                      <div className="h-1.5 bg-slate-800 rounded overflow-hidden"><div className="h-full bg-emerald-500 transition-all" style={{ width: batchProgress.total ? `${(batchProgress.done / batchProgress.total) * 100}%` : '15%' }} /></div>
+                      <div className="truncate text-[9px] text-slate-500 mt-1">{batchProgress.label}</div>
+                      {!batchProgress.running && <button onClick={() => setBatchProgress(null)} className="mt-2 text-[9px] text-slate-400 hover:text-white">Clear</button>}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                        <span className="whitespace-nowrap">ExoLab: every</span>
+                        <input type="number" min={1} max={297} value={batchStride} onChange={e => setBatchStride(Math.max(1, parseInt(e.target.value) || 1))} className="w-14 bg-slate-950 border border-slate-700 rounded p-1 text-xs text-white text-center" />
+                        <span className="whitespace-nowrap">frame(s)</span>
+                      </div>
+                      <button onClick={runExolabBatch} disabled={!state.roiGroups.length} className={`w-full flex items-center justify-center gap-2 py-2 rounded text-[10px] font-bold transition-all ${state.roiGroups.length ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-slate-800 text-slate-600 cursor-not-allowed'}`}>
+                        <FlaskConical size={13}/> Run on ExoLab-11 GRW08 timelapse
+                      </button>
+                      <button onClick={() => document.getElementById('batch-files')?.click()} disabled={!state.roiGroups.length} className={`w-full flex items-center justify-center gap-2 py-2 rounded text-[10px] font-bold transition-all border ${state.roiGroups.length ? 'bg-slate-800 border-slate-700 text-slate-200 hover:bg-slate-700' : 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'}`}>
+                        <Upload size={13}/> Add images… (batch your own)
+                      </button>
+                      <input id="batch-files" type="file" accept="image/*" multiple className="hidden" onChange={e => { onBatchFiles(e.target.files); e.currentTarget.value = ''; }} />
+                      {!state.roiGroups.length && <p className="text-[9px] text-amber-400/80 italic">Draw at least one region first — batch reuses it on every image.</p>}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </aside>
