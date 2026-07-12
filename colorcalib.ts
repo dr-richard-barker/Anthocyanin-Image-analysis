@@ -181,14 +181,85 @@ export function applyAffineToImageData(data: Uint8ClampedArray, M: number[][]): 
   }
 }
 
-// --- marker detection (js-aruco2) -------------------------------------------
+// --- marker detection --------------------------------------------------------
 
-// Detect the 4 corner fiducials. Returns corners ordered [TL,TR,BR,BL], or null
-// if fewer than 2 usable markers are found. When exactly 2 (common under glare)
-// are found we complete the parallelogram so the user can drag the rest.
+// Geometric fiducial detector (dictionary-independent). The Astrobotany markers
+// use CUSTOM corner icons that generic ArUco/AprilTag decoders do not read, so
+// we find the 4 dark corner SQUARES by contour geometry instead — the same
+// approach as the PlantCV Pro notebook. Reuses js-aruco2's bundled CV module
+// (grayscale -> adaptive threshold -> contours -> polygon approximation).
+async function detectQuadCV(data: Uint8ClampedArray, w: number, h: number): Promise<Pt[] | null> {
+  let CV: any;
+  try {
+    const mod: any = await import('js-aruco2/src/cv.js');
+    CV = (mod.default || mod).CV || mod.CV;
+  } catch {
+    return null;
+  }
+  if (!CV || !CV.adaptiveThreshold) return null;
+
+  const findSquares = (kernel: number): { x: number; y: number; a: number }[] => {
+    const grey = new CV.Image(), thres = new CV.Image(), bin = new CV.Image();
+    CV.grayscale({ width: w, height: h, data }, grey);
+    CV.adaptiveThreshold(grey, thres, kernel, 7);
+    const out: { x: number; y: number; a: number }[] = [];
+    for (const c of CV.findContours(thres, bin)) {
+      if (c.length < w * 0.02) continue;
+      const poly = CV.approxPolyDP(c, c.length * 0.05);
+      if (poly.length !== 4 || !CV.isContourConvex(poly)) continue;
+      const xs = poly.map((p: Pt) => p.x), ys = poly.map((p: Pt) => p.y);
+      const minx = Math.min(...xs), maxx = Math.max(...xs), miny = Math.min(...ys), maxy = Math.max(...ys);
+      const bw = maxx - minx, bh = maxy - miny;
+      if (bw < 5 || bh < 5 || bw / bh < 0.6 || bw / bh > 1.6) continue;
+      let a = 0;
+      for (let i = 0; i < 4; i++) { const p = poly[i], q = poly[(i + 1) % 4]; a += p.x * q.y - q.x * p.y; }
+      a = Math.abs(a / 2);
+      if (a < w * h * 2e-4 || a > w * h * 2e-2 || a / (bw * bh) < 0.6) continue;
+      out.push({ x: (minx + maxx) / 2, y: (miny + maxy) / 2, a });
+    }
+    return out;
+  };
+
+  const pickQuad = (sq: { x: number; y: number; a: number }[]): Pt[] | null => {
+    if (sq.length < 4) return null;
+    sq.sort((a, b) => b.a - a.a);
+    const areas = sq.slice(0, 8).map(c => c.a).sort((x, y) => x - y);
+    const med = areas[Math.floor(Math.min(8, sq.length) / 2)];
+    const keep = sq.filter(c => c.a > 0.5 * med && c.a < 1.8 * med);
+    if (keep.length < 4) return null;
+    // 4 corner-most by x±y extremes (excludes any central false positive)
+    const TL = keep.reduce((a, b) => a.x + a.y < b.x + b.y ? a : b);
+    const BR = keep.reduce((a, b) => a.x + a.y > b.x + b.y ? a : b);
+    const TR = keep.reduce((a, b) => a.x - a.y > b.x - b.y ? a : b);
+    const BL = keep.reduce((a, b) => a.x - a.y < b.x - b.y ? a : b);
+    const quad = [TL, TR, BR, BL].map(p => ({ x: p.x, y: p.y }));
+    // reject degenerate quads (collinear / tiny)
+    const qa = Math.abs((TR.x - TL.x) * (BL.y - TL.y) - (TR.y - TL.y) * (BL.x - TL.x));
+    if (qa < w * h * 0.002) return null;
+    const uniq = new Set(quad.map(p => `${Math.round(p.x)},${Math.round(p.y)}`));
+    return uniq.size === 4 ? quad : null;
+  };
+
+  const md = Math.min(w, h);
+  for (const kf of [0.004, 0.006, 0.008, 0.003]) {
+    try {
+      const quad = pickQuad(findSquares(Math.max(4, Math.min(20, Math.round(md * kf)))));
+      if (quad) return quad;
+    } catch { /* try next kernel */ }
+  }
+  return null;
+}
+
+// Detect the 4 corner fiducials. Returns corners ordered [TL,TR,BR,BL]. Tries the
+// geometric detector first (reliable for the custom Astrobotany fiducials), then
+// falls back to ArUco decoding (which sometimes recovers a couple of corners on
+// glary frames the geometric pass misses).
 export async function detectMarkerCorners(
   data: Uint8ClampedArray, w: number, h: number
 ): Promise<{ corners: Pt[] | null; found: number }> {
+  const cvQuad = await detectQuadCV(data, w, h);
+  if (cvQuad) return { corners: orderCorners(cvQuad), found: 4 };
+
   let AR: any;
   try {
     const mod: any = await import('js-aruco2');

@@ -809,7 +809,7 @@ const App = () => {
               <div className="space-y-6">
                 <div>
                   <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 flex items-center gap-2"><ScanLine size={14}/> Astrocalibration Marker</h3>
-                  <p className="text-[10px] text-slate-400 leading-relaxed mb-3 italic">Colour-correct against the AIRI marker. Auto-detect is attempted; the Astrobotany fiducials use custom icons, so you'll usually drag the 4 corner handles onto the marker's corner squares yourself. For fully automatic batch processing use the <b>PlantCV Pro notebook</b>.</p>
+                  <p className="text-[10px] text-slate-400 leading-relaxed mb-3 italic">One click auto-detects the marker's 4 corner fiducials and colour-corrects the image. On a clean, flat marker this "just works"; otherwise drag the purple corner handles onto the fiducials. For batch/timelapse processing use the <b>PlantCV Pro notebook</b>.</p>
                   <button disabled={state.isDetectingMarker} onClick={handleDetectMarker} className="w-full flex items-center justify-center gap-2 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded text-[10px] font-bold transition-all mb-3">
                     {state.isDetectingMarker ? <RefreshCw className="animate-spin" size={14}/> : <ScanLine size={14}/>} {state.isDetectingMarker ? 'Detecting…' : 'Detect / place marker'}
                   </button>
