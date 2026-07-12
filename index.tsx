@@ -32,7 +32,8 @@ import {
   Minimize,
   RotateCw,
   Ruler,
-  ScanLine
+  ScanLine,
+  Undo2
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { ASTRO_CHIPS, detectMarkerCorners, fitFromQuad, scaleAndRotation, chipImagePoints, applyAffineToImageData, type Pt } from './colorcalib';
@@ -253,6 +254,67 @@ const buildReportSummary = (groups: ROIGroup[], r: AppState['regressionParams'])
   return `${p1}\n${p2}`;
 };
 
+// --- Automatic segmentation thresholds -------------------------------------
+// All operate on a 256-bin histogram of the Excess-Green index (2G-R-B, clamped
+// to 0..255) and return an ExG threshold that separates background from plant.
+
+const otsuThreshold = (hist: number[]): number => {
+  const total = hist.reduce((a, b) => a + b, 0);
+  if (!total) return 0;
+  let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+  let sumB = 0, wB = 0, maxVar = -1, thresh = 0;
+  for (let i = 0; i < 256; i++) {
+    wB += hist[i]; if (wB === 0) continue;
+    const wF = total - wB; if (wF === 0) break;
+    sumB += i * hist[i];
+    const mB = sumB / wB, mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > maxVar) { maxVar = between; thresh = i; }
+  }
+  return thresh;
+};
+
+const triangleThreshold = (hist: number[]): number => {
+  let peak = 0, peakIdx = 0, min = 255, max = 0;
+  for (let i = 0; i < 256; i++) {
+    if (hist[i] > peak) { peak = hist[i]; peakIdx = i; }
+    if (hist[i] > 0) { if (i < min) min = i; if (i > max) max = i; }
+  }
+  const end = (peakIdx - min) < (max - peakIdx) ? max : min; // farther tail
+  const x1 = peakIdx, y1 = peak, x2 = end, y2 = hist[end] || 0;
+  const lo = Math.min(peakIdx, end), hi = Math.max(peakIdx, end);
+  let best = -1, thr = peakIdx;
+  for (let i = lo; i <= hi; i++) {
+    const dist = Math.abs((y2 - y1) * i - (x2 - x1) * hist[i] + x2 * y1 - y2 * x1);
+    if (dist > best) { best = dist; thr = i; }
+  }
+  return thr;
+};
+
+const meanThreshold = (hist: number[]): number => {
+  let s = 0, n = 0;
+  for (let i = 0; i < 256; i++) { s += i * hist[i]; n += hist[i]; }
+  return n ? Math.round(s / n) : 0;
+};
+
+// Iterative isodata / intermeans threshold.
+const isodataThreshold = (hist: number[]): number => {
+  let t = 128;
+  for (let iter = 0; iter < 100; iter++) {
+    let s1 = 0, n1 = 0, s2 = 0, n2 = 0;
+    for (let i = 0; i < 256; i++) { if (i <= t) { s1 += i * hist[i]; n1 += hist[i]; } else { s2 += i * hist[i]; n2 += hist[i]; } }
+    const m1 = n1 ? s1 / n1 : 0, m2 = n2 ? s2 / n2 : 0;
+    const nt = Math.round((m1 + m2) / 2);
+    if (nt === t) break; t = nt;
+  }
+  return t;
+};
+
+type ThresholdMethod = 'otsu' | 'triangle' | 'isodata' | 'mean';
+const THRESHOLD_FNS: Record<ThresholdMethod, (h: number[]) => number> = {
+  otsu: otsuThreshold, triangle: triangleThreshold, isodata: isodataThreshold, mean: meanThreshold,
+};
+
 // --- Main App ---
 
 const App = () => {
@@ -273,6 +335,67 @@ const App = () => {
   const [githubConfig, setGithubConfig] = useState({ token: '', owner: '', repo: '', path: 'biopheno-results' });
   const [githubStatus, setGithubStatus] = useState<'idle' | 'uploading' | 'success' | 'error'>('idle');
 
+  // --- Undo history + deletion ---
+  const stateRef = useRef(state); stateRef.current = state; // always the latest state
+  const historyRef = useRef<Partial<AppState>[]>([]);
+  const [historyLen, setHistoryLen] = useState(0);
+  const SNAP_KEYS: (keyof AppState)[] = [
+    'roiGroups', 'exclusionZones', 'activeGroupId', 'selectedShapeId', 'segmentationThreshold',
+    'calibrationColor', 'calibrationROI', 'whitePointColor', 'whitePointROI', 'blackPointColor', 'blackPointROI',
+    'scaleROI', 'markerCorners', 'colorMatrix', 'colorCorrectionEnabled', 'colorResidual', 'markerFound',
+    'pixelsPerCm', 'rotationAngle', 'lensCorrection',
+  ];
+  // Snapshot the editable "document" state before a mutation so Ctrl+Z can undo it.
+  const pushHistory = () => {
+    const s: any = stateRef.current, snap: any = {};
+    SNAP_KEYS.forEach(k => { snap[k] = s[k]; });
+    historyRef.current = [...historyRef.current.slice(-49), snap];
+    setHistoryLen(historyRef.current.length);
+  };
+  const undo = () => {
+    const h = historyRef.current;
+    if (!h.length) return;
+    const prev = h[h.length - 1];
+    historyRef.current = h.slice(0, -1);
+    setHistoryLen(historyRef.current.length);
+    setState(s => ({ ...s, ...prev }));
+  };
+  const deleteSelected = () => {
+    const s = stateRef.current;
+    const id = s.selectedShapeId;
+    if (!id) return;
+    pushHistory();
+    setState(cur => ({
+      ...cur,
+      selectedShapeId: null,
+      exclusionZones: cur.exclusionZones.filter(z => z.id !== id),
+      roiGroups: cur.roiGroups.map(g => ({ ...g, shapes: g.shapes.filter(sh => sh.id !== id) })),
+      scaleROI: cur.scaleROI?.id === id ? null : cur.scaleROI,
+      calibrationROI: cur.calibrationROI?.id === id ? null : cur.calibrationROI,
+      whitePointROI: cur.whitePointROI?.id === id ? null : cur.whitePointROI,
+      blackPointROI: cur.blackPointROI?.id === id ? null : cur.blackPointROI,
+    }));
+  };
+
+  // Automatic ExG segmentation threshold (Otsu and friends).
+  const applyAutoThreshold = (method: ThresholdMethod) => {
+    const raw = rawImageData(); if (!raw) return;
+    const { data, w, h } = raw;
+    if (stateRef.current.colorCorrectionEnabled && stateRef.current.colorMatrix) {
+      applyAffineToImageData(data, stateRef.current.colorMatrix); // match the pipeline's corrected pixels
+    }
+    const hist = new Array(256).fill(0);
+    for (let i = 0; i < data.length; i += 4) {
+      let exg = 2 * data[i + 1] - data[i] - data[i + 2];
+      exg = exg < 0 ? 0 : exg > 255 ? 255 : exg;
+      hist[exg | 0]++;
+    }
+    void w; void h;
+    const t = Math.max(0, Math.min(150, Math.round(THRESHOLD_FNS[method](hist))));
+    pushHistory();
+    setState(s => ({ ...s, segmentationThreshold: t }));
+  };
+
   useEffect(() => {
     setState(s => ({ ...s, gallery: DEMO_IMAGES.map((d, i) => ({ id: `demo-${i}`, name: d.label, url: d.url })), activeImageIndex: 0 }));
   }, []);
@@ -282,6 +405,8 @@ const App = () => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelected(); return; }
       const map: Record<string, ToolType> = { v: 'select', r: 'rect', c: 'circle', l: 'lasso', h: 'pan' };
       if (e.key === 'Escape') setState(s => ({ ...s, activeTool: 'select', selectedShapeId: null }));
       else if (map[e.key.toLowerCase()]) setState(s => ({ ...s, activeTool: map[e.key.toLowerCase()] }));
@@ -577,16 +702,18 @@ const App = () => {
     if (state.activeTab === 'calibration' && state.markerCorners) {
       const hit = CORNER_HIT / (state.zoom || 1);
       const idx = state.markerCorners.findIndex(p => Math.abs(p.x - x) <= hit && Math.abs(p.y - y) <= hit);
-      if (idx >= 0) { setDragState({ mode: 'corner', startPoint, startScreenPoint: { x: 0, y: 0 }, activeHandle: null, initialPoints: [], cornerIndex: idx }); return; }
+      if (idx >= 0) { pushHistory(); setDragState({ mode: 'corner', startPoint, startScreenPoint: { x: 0, y: 0 }, activeHandle: null, initialPoints: [], cornerIndex: idx }); return; }
     }
 
     if (state.activeTool === 'select') {
       const hit = getShapeUnderCursor(x, y);
       if (hit) {
+        pushHistory(); // about to move a shape
         setState(s => ({ ...s, selectedShapeId: hit.shape.id, activeGroupId: hit.group?.id || s.activeGroupId }));
         setDragState({ mode: 'move', startPoint, startScreenPoint: { x:0,y:0 }, activeHandle: null, initialPoints: JSON.parse(JSON.stringify(hit.shape.points)) });
       } else { setState(s => ({ ...s, selectedShapeId: null })); }
     } else {
+      pushHistory(); // about to create a shape
       const newShape: Shape = { id: Math.random().toString(36), type: state.activeTool as any, points: [startPoint, startPoint] };
       if (state.activeTab === 'segmentation') setState(s => ({ ...s, exclusionZones: [...s.exclusionZones, newShape], selectedShapeId: newShape.id }));
       else if (state.activeTab === 'calibration') {
@@ -778,8 +905,12 @@ const App = () => {
                 <button title="Ellipse — drag on the image to draw a region" onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><CircleIcon size={16} /></button>
                 <button title="Lasso — click-drag a freehand outline" onClick={() => setState(s => ({...s, activeTool: 'lasso'}))} className={`p-2 rounded ${state.activeTool === 'lasso' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><Lasso size={16} /></button>
               </div>
-              <span className="text-[10px] font-mono text-slate-500 hidden md:inline">
-                {state.activeTool === 'select' ? 'Select mode — pick a shape (▢ ○ ⬡) to draw' :
+              <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 shadow-inner">
+                <button title="Undo (Ctrl+Z)" disabled={historyLen === 0} onClick={undo} className={`p-2 rounded ${historyLen > 0 ? 'text-slate-300 hover:text-white' : 'text-slate-600 cursor-not-allowed'}`}><Undo2 size={16} /></button>
+                <button title="Delete selected region (Del)" disabled={!state.selectedShapeId} onClick={deleteSelected} className={`p-2 rounded ${state.selectedShapeId ? 'text-rose-400 hover:text-rose-300' : 'text-slate-600 cursor-not-allowed'}`}><Trash2 size={16} /></button>
+              </div>
+              <span className="text-[10px] font-mono text-slate-500 hidden lg:inline">
+                {state.activeTool === 'select' ? 'Select a region to move / delete (Del); pick ▢ ○ ⬡ to draw' :
                  state.activeTool === 'pan' ? 'Pan mode' : `Drawing: drag on the image`}
               </span>
               {state.activeTab === 'analysis' && (
@@ -834,7 +965,16 @@ const App = () => {
                 <div>
                   <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 flex items-center gap-2"><Maximize2 size={12}/> Extraction</h3>
                   <div className="flex justify-between text-xs mb-2"><span>ExG Threshold</span><span className="text-emerald-400 font-mono">{state.segmentationThreshold}</span></div>
-                  <input type="range" min="0" max="150" value={state.segmentationThreshold} onChange={(e) => setState(s => ({ ...s, segmentationThreshold: parseInt(e.target.value) }))} className="w-full accent-emerald-500 h-1" />
+                  <input type="range" min="0" max="150" value={state.segmentationThreshold} onMouseDown={pushHistory} onChange={(e) => setState(s => ({ ...s, segmentationThreshold: parseInt(e.target.value) }))} className="w-full accent-emerald-500 h-1" />
+                  <div className="mt-4">
+                    <div className="flex items-center gap-2 mb-2 text-[10px] text-slate-500"><Wand2 size={12}/> <span className="uppercase font-bold">Auto threshold</span></div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {([['otsu','Otsu'],['triangle','Triangle'],['isodata','IsoData'],['mean','Mean']] as [ThresholdMethod,string][]).map(([m,label]) => (
+                        <button key={m} onClick={() => applyAutoThreshold(m)} className="py-1.5 rounded text-[10px] font-bold bg-slate-800 border border-slate-700 text-slate-300 hover:bg-emerald-600 hover:text-white hover:border-emerald-500 transition-all">{label}</button>
+                      ))}
+                    </div>
+                    <p className="text-[9px] text-slate-500 leading-relaxed mt-2 italic">Compute the ExG threshold automatically from the image histogram. Otsu suits bimodal plant/background scenes; Triangle handles a dominant background.</p>
+                  </div>
                 </div>
                 <div className="pt-4 border-t border-slate-800">
                   <h3 className="text-xs font-bold text-slate-500 uppercase mb-4">Exclusion Zones</h3>
@@ -843,7 +983,7 @@ const App = () => {
                     {state.exclusionZones.map(z => (
                       <div key={z.id} className="flex items-center justify-between p-2 bg-slate-800 rounded border border-slate-700 text-[10px]">
                         <span>Excluded Area ({z.type})</span>
-                        <button onClick={() => setState(s => ({...s, exclusionZones: s.exclusionZones.filter(e => e.id !== z.id)}))} className="text-rose-400 hover:text-rose-300"><Trash2 size={12} /></button>
+                        <button title="Delete this zone" onClick={() => { pushHistory(); setState(s => ({...s, exclusionZones: s.exclusionZones.filter(e => e.id !== z.id)})); }} className="text-rose-400 hover:text-rose-300"><Trash2 size={12} /></button>
                       </div>
                     ))}
                     {state.exclusionZones.length === 0 && <div className="text-[10px] text-slate-600 text-center py-4 border border-dashed border-slate-800 rounded">No zones defined</div>}
@@ -936,7 +1076,7 @@ const App = () => {
                       <Plus size={14}/> {drawing ? 'Drawing — drag on the image (click to stop)' : 'Draw a region'}
                     </button>
                   ); })()}
-                  <p className="text-[9px] text-slate-500 leading-relaxed mb-4">Pick a shape (▢ ○ ⬡ in the top toolbar) and <b>drag on the image</b> to outline each plant / cohort. The tool stays active so you can draw several. Switch to the arrow (Select) to move or resize.</p>
+                  <p className="text-[9px] text-slate-500 leading-relaxed mb-4">Pick a shape (▢ ○ ⬡ in the top toolbar) and <b>drag on the image</b> to outline each plant / cohort. The tool stays active so you can draw several. Switch to the arrow (Select) to move, resize, or <b>delete</b> a region (click it, then <b>Del</b>). <b>Ctrl+Z</b> undoes.</p>
                   <div className="flex justify-between items-center mb-4">
                     <h3 className="text-xs font-bold text-slate-500 uppercase">Analysis Groups</h3>
                     <button title="Add a new group and draw into it" onClick={() => { const ng = { id: Math.random().toString(36), name: `Group ${state.roiGroups.length+1}`, color: COLORS[state.roiGroups.length%COLORS.length], shapes: [] }; setState(s => ({...s, roiGroups: [...s.roiGroups, ng], activeGroupId: ng.id, activeTool: 'rect' })); }} className="hover:text-emerald-400 text-slate-400"><Plus size={14}/></button>
@@ -947,7 +1087,7 @@ const App = () => {
                         <div className="flex items-center gap-2 mb-2">
                           <div className="w-2 h-2 rounded-full" style={{backgroundColor: g.color}} />
                           <input value={g.name} className="bg-transparent text-[10px] text-slate-200 outline-none w-full font-bold" onChange={(e) => setState(s => ({...s, roiGroups: s.roiGroups.map(gr => gr.id === g.id ? {...gr, name: e.target.value} : gr) }))} />
-                          <button onClick={(e) => { e.stopPropagation(); setState(s => ({...s, roiGroups: s.roiGroups.filter(gr => gr.id !== g.id)})) }} className="text-slate-600 hover:text-rose-400"><Trash2 size={12}/></button>
+                          <button title="Delete this group" onClick={(e) => { e.stopPropagation(); pushHistory(); setState(s => ({...s, roiGroups: s.roiGroups.filter(gr => gr.id !== g.id)})) }} className="text-slate-600 hover:text-rose-400"><Trash2 size={12}/></button>
                         </div>
                         <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-400 font-mono">
                           <div>Area: <span className="text-emerald-400 font-bold">{g.stats?.areaCm2.toFixed(2)} cm²</span></div>
