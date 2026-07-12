@@ -277,6 +277,19 @@ const App = () => {
     setState(s => ({ ...s, gallery: DEMO_IMAGES.map((d, i) => ({ id: `demo-${i}`, name: d.label, url: d.url })), activeImageIndex: 0 }));
   }, []);
 
+  // Keyboard shortcuts: Esc -> select/deselect; V select, R rect, C ellipse, L lasso, H pan.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const map: Record<string, ToolType> = { v: 'select', r: 'rect', c: 'circle', l: 'lasso', h: 'pan' };
+      if (e.key === 'Escape') setState(s => ({ ...s, activeTool: 'select', selectedShapeId: null }));
+      else if (map[e.key.toLowerCase()]) setState(s => ({ ...s, activeTool: map[e.key.toLowerCase()] }));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   useEffect(() => {
     if (!state.gallery[state.activeImageIndex]) return;
     const img = new Image();
@@ -637,7 +650,12 @@ const App = () => {
       }
     }
     setDragState(null);
-    if (state.activeTool !== 'select' && state.activeTool !== 'pan') setState(s => ({ ...s, activeTool: 'select' }));
+    // Keep the drawing tool active so multiple ROIs can be drawn in a row.
+    // The lasso is a one-shot gesture, so it reverts to select after each stroke;
+    // calibration ROIs are single-purpose, so they revert too.
+    if (state.activeTool === 'lasso' || (state.activeTab === 'calibration' && state.activeTool !== 'select' && state.activeTool !== 'pan')) {
+      setState(s => ({ ...s, activeTool: 'select' }));
+    }
   };
 
   const calculateCalibrationFromROI = (s: Shape, type: 'gray'|'white'|'black') => {
@@ -730,13 +748,17 @@ const App = () => {
           <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 backdrop-blur z-20">
             <div className="flex items-center gap-4">
               <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 shadow-inner">
-                <button onClick={() => setState(s => ({...s, activeTool: 'pan'}))} className={`p-2 rounded ${state.activeTool === 'pan' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><Move size={16} /></button>
+                <button title="Pan (hold to move the image)" onClick={() => setState(s => ({...s, activeTool: 'pan'}))} className={`p-2 rounded ${state.activeTool === 'pan' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><Move size={16} /></button>
                 <div className="w-px h-4 bg-slate-700 mx-1" />
-                <button onClick={() => setState(s => ({...s, activeTool: 'select'}))} className={`p-2 rounded ${state.activeTool === 'select' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><MousePointer2 size={16} /></button>
-                <button onClick={() => setState(s => ({...s, activeTool: 'rect'}))} className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><Square size={16} /></button>
-                <button onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><CircleIcon size={16} /></button>
-                <button onClick={() => setState(s => ({...s, activeTool: 'lasso'}))} className={`p-2 rounded ${state.activeTool === 'lasso' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><Lasso size={16} /></button>
+                <button title="Select / move / resize regions" onClick={() => setState(s => ({...s, activeTool: 'select'}))} className={`p-2 rounded ${state.activeTool === 'select' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><MousePointer2 size={16} /></button>
+                <button title="Rectangle — drag on the image to draw a region" onClick={() => setState(s => ({...s, activeTool: 'rect'}))} className={`p-2 rounded ${state.activeTool === 'rect' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><Square size={16} /></button>
+                <button title="Ellipse — drag on the image to draw a region" onClick={() => setState(s => ({...s, activeTool: 'circle'}))} className={`p-2 rounded ${state.activeTool === 'circle' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><CircleIcon size={16} /></button>
+                <button title="Lasso — click-drag a freehand outline" onClick={() => setState(s => ({...s, activeTool: 'lasso'}))} className={`p-2 rounded ${state.activeTool === 'lasso' ? 'bg-indigo-600 shadow-sm' : 'text-slate-400 hover:text-white'}`}><Lasso size={16} /></button>
               </div>
+              <span className="text-[10px] font-mono text-slate-500 hidden md:inline">
+                {state.activeTool === 'select' ? 'Select mode — pick a shape (▢ ○ ⬡) to draw' :
+                 state.activeTool === 'pan' ? 'Pan mode' : `Drawing: drag on the image`}
+              </span>
               {state.activeTab === 'analysis' && (
                 <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 ml-2 shadow-inner">
                    <button onClick={() => setState(s => ({...s, visualizationMode: 'rgb'}))} className={`px-2 py-1 text-[10px] rounded transition-all ${state.visualizationMode === 'rgb' ? 'bg-slate-600 text-white' : 'text-slate-400'}`}>RGB</button>
@@ -773,7 +795,7 @@ const App = () => {
 
         <div className={`flex-1 flex overflow-hidden ${state.activeTab === 'report' ? 'hidden' : ''}`}>
           <div className="flex-1 p-6 relative overflow-hidden bg-slate-950">
-            <div ref={containerRef} onWheel={(e) => { e.preventDefault(); const f = e.deltaY>0?0.9:1.1; setState(s => ({...s, zoom: Math.max(0.1, Math.min(20, s.zoom*f))})); }} className="w-full h-full border border-slate-800 rounded-xl relative overflow-hidden cursor-crosshair shadow-2xl">
+            <div ref={containerRef} onWheel={(e) => { e.preventDefault(); const f = e.deltaY>0?0.9:1.1; setState(s => ({...s, zoom: Math.max(0.1, Math.min(20, s.zoom*f))})); }} className={`w-full h-full border border-slate-800 rounded-xl relative overflow-hidden shadow-2xl ${state.activeTool === 'pan' ? 'cursor-grab' : (state.activeTool === 'select' ? 'cursor-default' : 'cursor-crosshair')}`}>
               <div style={{ transform: `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`, transformOrigin: '0 0', width: '100%', height: '100%' }}>
                 <canvas ref={canvasRef} className="absolute inset-0 block" />
                 <canvas ref={overlayRef} className="absolute inset-0 w-full h-full pointer-events-auto" onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} />
@@ -883,9 +905,16 @@ const App = () => {
             {state.activeTab === 'analysis' && (
               <div className="space-y-6">
                 <div>
+                  {(() => { const drawing = state.activeTool === 'rect' || state.activeTool === 'circle' || state.activeTool === 'lasso'; return (
+                    <button onClick={() => setState(s => ({ ...s, activeTool: drawing ? 'select' : 'rect' }))}
+                      className={`w-full flex items-center justify-center gap-2 py-2 rounded text-[11px] font-bold transition-all mb-2 ${drawing ? 'bg-emerald-600 text-white shadow-lg animate-pulse' : 'bg-emerald-600/90 hover:bg-emerald-500 text-white'}`}>
+                      <Plus size={14}/> {drawing ? 'Drawing — drag on the image (click to stop)' : 'Draw a region'}
+                    </button>
+                  ); })()}
+                  <p className="text-[9px] text-slate-500 leading-relaxed mb-4">Pick a shape (▢ ○ ⬡ in the top toolbar) and <b>drag on the image</b> to outline each plant / cohort. The tool stays active so you can draw several. Switch to the arrow (Select) to move or resize.</p>
                   <div className="flex justify-between items-center mb-4">
                     <h3 className="text-xs font-bold text-slate-500 uppercase">Analysis Groups</h3>
-                    <button onClick={() => setState(s => ({...s, roiGroups: [...s.roiGroups, { id: Math.random().toString(36), name: `Group ${s.roiGroups.length+1}`, color: COLORS[s.roiGroups.length%COLORS.length], shapes: [] }] }))} className="hover:text-emerald-400 text-slate-400"><Plus size={14}/></button>
+                    <button title="Add an empty group" onClick={() => setState(s => ({...s, roiGroups: [...s.roiGroups, { id: Math.random().toString(36), name: `Group ${s.roiGroups.length+1}`, color: COLORS[s.roiGroups.length%COLORS.length], shapes: [] }], activeGroupId: s.roiGroups.length === 0 ? s.activeGroupId : s.activeGroupId }))} className="hover:text-emerald-400 text-slate-400"><Plus size={14}/></button>
                   </div>
                   <div className="space-y-3">
                     {state.roiGroups.map(g => (
@@ -902,7 +931,7 @@ const App = () => {
                         </div>
                       </div>
                     ))}
-                    {state.roiGroups.length === 0 && <div className="text-[10px] text-slate-600 text-center py-8 border border-dashed border-slate-800 rounded">Draw on canvas to create groups</div>}
+                    {state.roiGroups.length === 0 && <div className="text-[10px] text-slate-600 text-center py-8 border border-dashed border-slate-800 rounded">No regions yet — click <span className="text-emerald-400 font-bold">Draw a region</span> above, then drag on the image.</div>}
                   </div>
                 </div>
               </div>
