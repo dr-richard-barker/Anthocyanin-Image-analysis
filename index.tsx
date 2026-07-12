@@ -1048,6 +1048,7 @@ const App = () => {
           <NavButton active={state.activeTab === 'analysis'} onClick={() => setState(s => ({ ...s, activeTab: 'analysis' }))} icon={<BarChart3 size={18} />} label="Results" />
           <div className="pt-4 mt-4 border-t border-slate-800 space-y-2">
             <button onClick={handleGenerateReport} className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all ${state.activeTab === 'report' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800'}`}><FileText size={18} /> Generate Report</button>
+            <a href="guide/" target="_blank" rel="noopener" className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-all"><FileText size={18} /> User Guide ↗</a>
           </div>
         </nav>
       </aside>

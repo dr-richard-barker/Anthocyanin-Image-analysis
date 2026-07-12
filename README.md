@@ -3,6 +3,7 @@
 ### ▶ Use it now: **[dr-richard-barker.github.io/Anthocyanin-Image-analysis](https://dr-richard-barker.github.io/Anthocyanin-Image-analysis/)**
 
 No install required — it runs entirely in your browser.
+📖 New here? Read the **[step-by-step User Guide](https://dr-richard-barker.github.io/Anthocyanin-Image-analysis/guide/)** (annotated screenshots).
 
 A browser-based image-analysis tool for plant phenotyping. Upload a photo of a
 plant tray, rosette, or leaf; segment the vegetation; calibrate colour and
