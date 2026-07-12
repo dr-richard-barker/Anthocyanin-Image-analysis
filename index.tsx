@@ -298,17 +298,36 @@ const App = () => {
     img.onload = () => {
       loadedImageRef.current = img;
       setState(s => ({ ...s, exclusionZones: [], roiGroups: [], activeGroupId: null, rotationAngle: 0, lensCorrection: 0, scaleROI: null, pixelsPerCm: null, selectedShapeId: null, markerCorners: null, colorMatrix: null, colorCorrectionEnabled: false, colorResidual: null, markerFound: 0 }));
-      setTimeout(fitImageToScreen, 50);
+      setTimeout(() => fitImageToScreen(), 60);
     };
   }, [state.activeImageIndex, state.gallery]);
 
-  const fitImageToScreen = () => {
-    if (!loadedImageRef.current || !containerRef.current) return;
-    const container = containerRef.current, img = loadedImageRef.current;
-    let zoom = Math.min((container.clientWidth - 40) / img.width, (container.clientHeight - 40) / img.height);
-    if (!(zoom > 0) || !isFinite(zoom)) zoom = Math.min(container.clientWidth / img.width, container.clientHeight / img.height) || 1;
-    zoom = Math.max(0.02, zoom); // never zero/negative
-    setState(s => ({ ...s, zoom, pan: { x: (container.clientWidth - img.width * zoom) / 2, y: (container.clientHeight - img.height * zoom) / 2 } }));
+  // Refit when the container first gains size or the pane is resized, so the
+  // image/overlay are always on-screen and interactive.
+  useEffect(() => {
+    if (!containerRef.current || typeof ResizeObserver === 'undefined') return;
+    let last = 0;
+    const ro = new ResizeObserver(() => {
+      const c = containerRef.current; if (!c) return;
+      const size = c.clientWidth + c.clientHeight;
+      if (Math.abs(size - last) > 8) { last = size; fitImageToScreen(); }
+    });
+    ro.observe(containerRef.current);
+    return () => ro.disconnect();
+  }, []);
+
+  const fitImageToScreen = (retries = 30) => {
+    const img = loadedImageRef.current, container = containerRef.current;
+    if (!img) return; // nothing to fit yet; the image onload will call again
+    // The container may not be mounted/laid out yet (null or 0 size) when this
+    // first runs — retry on the next frame instead of committing a broken
+    // zoom/pan (which pushed the canvas off-screen and made drawing impossible).
+    const cw = container?.clientWidth ?? 0, ch = container?.clientHeight ?? 0;
+    if (!container || cw < 40 || ch < 40) { if (retries > 0) setTimeout(() => fitImageToScreen(retries - 1), 30); return; }
+    let zoom = Math.min((cw - 40) / img.width, (ch - 40) / img.height);
+    if (!(zoom > 0) || !isFinite(zoom)) zoom = 1;
+    zoom = Math.max(0.02, Math.min(20, zoom));
+    setState(s => ({ ...s, zoom, pan: { x: (cw - img.width * zoom) / 2, y: (ch - img.height * zoom) / 2 } }));
   };
 
   useEffect(() => { if (state.activeTab !== 'report') runPipeline(); }, [
@@ -797,8 +816,10 @@ const App = () => {
           <div className="flex-1 p-6 relative overflow-hidden bg-slate-950">
             <div ref={containerRef} onWheel={(e) => { e.preventDefault(); const f = e.deltaY>0?0.9:1.1; setState(s => ({...s, zoom: Math.max(0.1, Math.min(20, s.zoom*f))})); }} className={`w-full h-full border border-slate-800 rounded-xl relative overflow-hidden shadow-2xl ${state.activeTool === 'pan' ? 'cursor-grab' : (state.activeTool === 'select' ? 'cursor-default' : 'cursor-crosshair')}`}>
               <div style={{ transform: `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`, transformOrigin: '0 0', width: '100%', height: '100%' }}>
-                <canvas ref={canvasRef} className="absolute inset-0 block" />
-                <canvas ref={overlayRef} className="absolute inset-0 w-full h-full pointer-events-auto" onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} />
+                {/* Both canvases render at intrinsic buffer size (the image dimensions) so
+                    they overlap exactly; the wrapper's scale(zoom) fits them to the view. */}
+                <canvas ref={canvasRef} className="absolute top-0 left-0 block" />
+                <canvas ref={overlayRef} className="absolute top-0 left-0 block pointer-events-auto" onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} />
               </div>
             </div>
           </div>
@@ -914,7 +935,7 @@ const App = () => {
                   <p className="text-[9px] text-slate-500 leading-relaxed mb-4">Pick a shape (▢ ○ ⬡ in the top toolbar) and <b>drag on the image</b> to outline each plant / cohort. The tool stays active so you can draw several. Switch to the arrow (Select) to move or resize.</p>
                   <div className="flex justify-between items-center mb-4">
                     <h3 className="text-xs font-bold text-slate-500 uppercase">Analysis Groups</h3>
-                    <button title="Add an empty group" onClick={() => setState(s => ({...s, roiGroups: [...s.roiGroups, { id: Math.random().toString(36), name: `Group ${s.roiGroups.length+1}`, color: COLORS[s.roiGroups.length%COLORS.length], shapes: [] }], activeGroupId: s.roiGroups.length === 0 ? s.activeGroupId : s.activeGroupId }))} className="hover:text-emerald-400 text-slate-400"><Plus size={14}/></button>
+                    <button title="Add a new group and draw into it" onClick={() => { const ng = { id: Math.random().toString(36), name: `Group ${state.roiGroups.length+1}`, color: COLORS[state.roiGroups.length%COLORS.length], shapes: [] }; setState(s => ({...s, roiGroups: [...s.roiGroups, ng], activeGroupId: ng.id, activeTool: 'rect' })); }} className="hover:text-emerald-400 text-slate-400"><Plus size={14}/></button>
                   </div>
                   <div className="space-y-3">
                     {state.roiGroups.map(g => (
