@@ -302,18 +302,22 @@ const App = () => {
     };
   }, [state.activeImageIndex, state.gallery]);
 
-  // Refit when the container first gains size or the pane is resized, so the
-  // image/overlay are always on-screen and interactive.
+  // Refit when the container first gains size or the window/pane is resized, so
+  // the image/overlay are always on-screen and interactive.
   useEffect(() => {
-    if (!containerRef.current || typeof ResizeObserver === 'undefined') return;
     let last = 0;
-    const ro = new ResizeObserver(() => {
+    const refit = () => {
       const c = containerRef.current; if (!c) return;
       const size = c.clientWidth + c.clientHeight;
       if (Math.abs(size - last) > 8) { last = size; fitImageToScreen(); }
-    });
-    ro.observe(containerRef.current);
-    return () => ro.disconnect();
+    };
+    window.addEventListener('resize', refit);
+    let ro: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
+      ro = new ResizeObserver(refit);
+      ro.observe(containerRef.current);
+    }
+    return () => { window.removeEventListener('resize', refit); ro?.disconnect(); };
   }, []);
 
   const fitImageToScreen = (retries = 30) => {
