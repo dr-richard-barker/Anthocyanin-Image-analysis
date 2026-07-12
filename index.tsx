@@ -33,7 +33,8 @@ import {
   RotateCw,
   Ruler,
   ScanLine,
-  Undo2
+  Undo2,
+  Download
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { ASTRO_CHIPS, detectMarkerCorners, fitFromQuad, scaleAndRotation, chipImagePoints, applyAffineToImageData, type Pt } from './colorcalib';
@@ -394,6 +395,43 @@ const App = () => {
     const t = Math.max(0, Math.min(150, Math.round(THRESHOLD_FNS[method](hist))));
     pushHistory();
     setState(s => ({ ...s, segmentationThreshold: t }));
+  };
+
+  // Export every ROI group's statistics (plus calibration context) as a CSV.
+  const downloadCSV = () => {
+    const s = stateRef.current;
+    if (!s.roiGroups.length) return;
+    const img = s.gallery[s.activeImageIndex]?.name || 'image';
+    const model = `${s.regressionParams.slope}*${s.regressionParams.targetIndex}+${s.regressionParams.intercept}`;
+    const esc = (v: any) => { const str = String(v ?? ''); return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str; };
+    const headers = ['image', 'group', 'pixel_count', 'area_cm2', 'mean_NGRDI', 'mean_mACI', 'mean_GI',
+      'est_anthocyanin', 'mean_R', 'mean_G', 'mean_B', 'px_per_cm', 'exg_threshold', 'colour_residual', 'anthocyanin_model'];
+    const rows = s.roiGroups.map(g => {
+      const st = g.stats, c = st?.pixelCount || 0;
+      return [
+        img, g.name, c,
+        st ? st.areaCm2.toFixed(4) : '',
+        st ? st.meanNGRDI.toFixed(5) : '',
+        st ? st.meanMACI.toFixed(5) : '',
+        st ? st.meanGI.toFixed(5) : '',
+        st ? st.anthocyanin.toFixed(5) : '',
+        st && c ? (st.sumR / c).toFixed(2) : '',
+        st && c ? (st.sumG / c).toFixed(2) : '',
+        st && c ? (st.sumB / c).toFixed(2) : '',
+        s.pixelsPerCm ? s.pixelsPerCm.toFixed(2) : '',
+        s.segmentationThreshold,
+        s.colorResidual != null ? s.colorResidual.toFixed(4) : '',
+        model,
+      ];
+    });
+    const csv = [headers, ...rows].map(r => r.map(esc).join(',')).join('\r\n');
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `phenotype_${img.replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_')}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
   };
 
   useEffect(() => {
@@ -1099,6 +1137,14 @@ const App = () => {
                     {state.roiGroups.length === 0 && <div className="text-[10px] text-slate-600 text-center py-8 border border-dashed border-slate-800 rounded">No regions yet — click <span className="text-emerald-400 font-bold">Draw a region</span> above, then drag on the image.</div>}
                   </div>
                 </div>
+                {state.roiGroups.length > 0 && (
+                  <div className="pt-4 border-t border-slate-800">
+                    <button onClick={downloadCSV} className="w-full flex items-center justify-center gap-2 py-2 rounded text-[11px] font-bold bg-slate-800 border border-slate-700 text-slate-200 hover:bg-emerald-600 hover:border-emerald-500 hover:text-white transition-all">
+                      <Download size={14}/> Download all as CSV
+                    </button>
+                    <p className="text-[9px] text-slate-500 leading-relaxed mt-2 italic">One row per region group — area, NGRDI, mACI, GI, estimated anthocyanin, mean RGB, plus calibration context.</p>
+                  </div>
+                )}
               </div>
             )}
           </aside>
@@ -1113,6 +1159,7 @@ const App = () => {
                   <p className="text-sm text-slate-500 font-serif mt-2">Generated via <strong>BioPheno Suite</strong> | {new Date().toLocaleDateString()} | ID: BP-{Math.floor(Math.random()*10000)}</p>
                 </div>
                 <div className="flex items-center gap-4 print:hidden">
+                   <button onClick={downloadCSV} className="flex items-center gap-2 px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold shadow-lg transition-all"><Download size={18}/> CSV</button>
                    <button onClick={() => window.print()} className="flex items-center gap-2 px-6 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded font-bold shadow-lg transition-all"><Printer size={18}/> Print / PDF</button>
                    <button onClick={() => setState(s => ({...s, activeTab: 'analysis'}))} className="px-4 py-2 border border-slate-300 rounded font-medium">Exit</button>
                 </div>
