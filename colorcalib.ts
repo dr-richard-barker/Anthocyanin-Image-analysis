@@ -183,19 +183,42 @@ export function applyAffineToImageData(data: Uint8ClampedArray, M: number[][]): 
 
 // --- marker detection --------------------------------------------------------
 
+// js-aruco2's cv.js/aruco.js use the classic global idiom `this.CV = CV` at the
+// top level. Bundled as an ES module, top-level `this` is `undefined`, so a plain
+// `import('js-aruco2/src/cv.js')` THROWS ("Cannot set properties of undefined
+// (setting 'CV')") before any export is usable — which silently killed the whole
+// geometric detector in production builds. We instead load the module SOURCE as
+// text (Vite `?raw`) and evaluate it against an explicit context object, so
+// `this.CV` lands on a real object no matter how the bundler treats `this`.
+let cvModulePromise: Promise<any> | null = null;
+async function loadCV(): Promise<any> {
+  if (cvModulePromise) return cvModulePromise;
+  cvModulePromise = (async () => {
+    // Primary: raw-source eval with a controlled `this` (bundler-independent).
+    try {
+      const src: string = (await import('js-aruco2/src/cv.js?raw')).default;
+      const ctx: any = {};
+      new Function(src).call(ctx);
+      if (ctx.CV && ctx.CV.adaptiveThreshold) return ctx.CV;
+    } catch { /* fall through to direct import */ }
+    // Fallback: a direct import in case a future bundler exposes CV cleanly.
+    try {
+      const mod: any = await import('js-aruco2/src/cv.js');
+      const CV = (mod.default || mod).CV || mod.CV;
+      if (CV && CV.adaptiveThreshold) return CV;
+    } catch { /* give up */ }
+    return null;
+  })();
+  return cvModulePromise;
+}
+
 // Geometric fiducial detector (dictionary-independent). The Astrobotany markers
 // use CUSTOM corner icons that generic ArUco/AprilTag decoders do not read, so
 // we find the 4 dark corner SQUARES by contour geometry instead — the same
 // approach as the PlantCV Pro notebook. Reuses js-aruco2's bundled CV module
 // (grayscale -> adaptive threshold -> contours -> polygon approximation).
 async function detectQuadCV(data: Uint8ClampedArray, w: number, h: number): Promise<Pt[] | null> {
-  let CV: any;
-  try {
-    const mod: any = await import('js-aruco2/src/cv.js');
-    CV = (mod.default || mod).CV || mod.CV;
-  } catch {
-    return null;
-  }
+  const CV: any = await loadCV();
   if (!CV || !CV.adaptiveThreshold) return null;
 
   const findSquares = (kernel: number): { x: number; y: number; a: number }[] => {
@@ -220,34 +243,57 @@ async function detectQuadCV(data: Uint8ClampedArray, w: number, h: number): Prom
     return out;
   };
 
-  const pickQuad = (sq: { x: number; y: number; a: number }[]): Pt[] | null => {
-    if (sq.length < 4) return null;
-    sq.sort((a, b) => b.a - a.a);
-    const areas = sq.slice(0, 8).map(c => c.a).sort((x, y) => x - y);
-    const med = areas[Math.floor(Math.min(8, sq.length) / 2)];
-    const keep = sq.filter(c => c.a > 0.5 * med && c.a < 1.8 * med);
-    if (keep.length < 4) return null;
-    // 4 corner-most by x±y extremes (excludes any central false positive)
-    const TL = keep.reduce((a, b) => a.x + a.y < b.x + b.y ? a : b);
-    const BR = keep.reduce((a, b) => a.x + a.y > b.x + b.y ? a : b);
-    const TR = keep.reduce((a, b) => a.x - a.y > b.x - b.y ? a : b);
-    const BL = keep.reduce((a, b) => a.x - a.y < b.x - b.y ? a : b);
-    const quad = [TL, TR, BR, BL].map(p => ({ x: p.x, y: p.y }));
-    // reject degenerate quads (collinear / tiny)
-    const qa = Math.abs((TR.x - TL.x) * (BL.y - TL.y) - (TR.y - TL.y) * (BL.x - TL.x));
-    if (qa < w * h * 0.002) return null;
-    const uniq = new Set(quad.map(p => `${Math.round(p.x)},${Math.round(p.y)}`));
-    return uniq.size === 4 ? quad : null;
-  };
+  type Sq = { x: number; y: number; a: number };
 
+  // Aggregate square candidates across several adaptive-threshold kernel sizes so
+  // detection doesn't depend on one kernel (the browser's JPEG decode can differ
+  // subtly from Node's, changing which contours survive).
   const md = Math.min(w, h);
-  for (const kf of [0.004, 0.006, 0.008, 0.003]) {
-    try {
-      const quad = pickQuad(findSquares(Math.max(4, Math.min(20, Math.round(md * kf)))));
-      if (quad) return quad;
-    } catch { /* try next kernel */ }
+  // NOTE: CV.adaptiveThreshold -> stackBoxBlur only has mult/shift table entries
+  // for kernel sizes 0..15; a larger kernel yields an all-zero blur (undefined
+  // table lookup) and finds NOTHING. Clamp to that valid range so large uploaded
+  // photos don't silently fail to detect.
+  const kernels = [...new Set([0.003, 0.004, 0.005, 0.006, 0.008].map(k => Math.max(4, Math.min(15, Math.round(md * k)))))];
+  let all: Sq[] = [];
+  for (const k of kernels) { try { all = all.concat(findSquares(k)); } catch { /* skip kernel */ } }
+  if (all.length < 4) return null;
+
+  // Deduplicate overlapping detections of the same square (keep the larger).
+  all.sort((a, b) => b.a - a.a);
+  const mergeDist = md * 0.02;
+  const cand: Sq[] = [];
+  for (const c of all) if (!cand.some(k => Math.hypot(k.x - c.x, k.y - c.y) < mergeDist)) cand.push(c);
+  if (cand.length < 4) return null;
+
+  // The 4 fiducials are 4 SIMILAR-sized squares arranged as a rectangle. Try every
+  // size cluster (each candidate as a reference size), take the 4 corner-most, and
+  // keep the best-scoring valid rectangle. This ignores large outliers (dish/card
+  // outlines) that previously skewed a single median and filtered the fiducials out.
+  let best: Pt[] | null = null, bestScore = -Infinity;
+  for (const ref of cand) {
+    const cluster = cand.filter(c => c.a > 0.5 * ref.a && c.a < 2.0 * ref.a);
+    if (cluster.length < 4) continue;
+    const TL = cluster.reduce((a, b) => a.x + a.y < b.x + b.y ? a : b);
+    const BR = cluster.reduce((a, b) => a.x + a.y > b.x + b.y ? a : b);
+    const TR = cluster.reduce((a, b) => a.x - a.y > b.x - b.y ? a : b);
+    const BL = cluster.reduce((a, b) => a.x - a.y < b.x - b.y ? a : b);
+    const pts = [TL, TR, BR, BL];
+    if (new Set(pts.map(p => `${Math.round(p.x)},${Math.round(p.y)}`)).size !== 4) continue;
+    const qa = Math.abs((TR.x - TL.x) * (BL.y - TL.y) - (TR.y - TL.y) * (BL.x - TL.x));
+    if (qa < w * h * 0.004) continue; // reject tiny / collinear quads
+    const top = Math.hypot(TR.x - TL.x, TR.y - TL.y), bot = Math.hypot(BR.x - BL.x, BR.y - BL.y);
+    const left = Math.hypot(BL.x - TL.x, BL.y - TL.y), right = Math.hypot(BR.x - TR.x, BR.y - TR.y);
+    if (top < 1 || bot < 1 || left < 1 || right < 1) continue;
+    const aspect = ((top + bot) / 2) / ((left + right) / 2);
+    if (aspect < 0.4 || aspect > 2.6) continue; // marker is ~1.3 (landscape) or ~0.77 (portrait)
+    const edgeBalance = (Math.min(top, bot) / Math.max(top, bot)) * (Math.min(left, right) / Math.max(left, right));
+    const cornerAreas = pts.map(p => p.a);
+    const sizeBalance = Math.min(...cornerAreas) / Math.max(...cornerAreas);
+    if (sizeBalance < 0.3) continue; // the 4 fiducials should be similar-sized
+    const score = edgeBalance * 2 + sizeBalance + Math.min(cluster.length, 8) * 0.04;
+    if (score > bestScore) { bestScore = score; best = pts.map(p => ({ x: p.x, y: p.y })); }
   }
-  return null;
+  return best;
 }
 
 // Detect the 4 corner fiducials. Returns corners ordered [TL,TR,BR,BL]. Tries the
