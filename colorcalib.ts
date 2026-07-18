@@ -212,6 +212,34 @@ async function loadCV(): Promise<any> {
   return cvModulePromise;
 }
 
+// aruco.js has the SAME top-level-`this` problem as cv.js (`this.AR = AR`), so a
+// plain `import('js-aruco2')` throws under ESM bundling and the ArUco decoder
+// fallback never runs. Load its source and eval it against a context that already
+// carries CV (`var CV = this.CV || require('./cv').CV` — seeding this.CV avoids
+// the browser-unavailable `require`). Returns the AR namespace (AR.Detector).
+let arModulePromise: Promise<any> | null = null;
+async function loadAR(): Promise<any> {
+  if (arModulePromise) return arModulePromise;
+  arModulePromise = (async () => {
+    const CV = await loadCV(); // seed `this.CV` so aruco.js skips require('./cv')
+    // Primary: raw-source eval with a controlled `this` (bundler-independent).
+    try {
+      const src: string = (await import('js-aruco2/src/aruco.js?raw')).default;
+      const ctx: any = { CV };
+      new Function(src).call(ctx);
+      if (ctx.AR && ctx.AR.Detector) return ctx.AR;
+    } catch { /* fall through to direct import */ }
+    // Fallback: a direct import in case a future bundler exposes AR cleanly.
+    try {
+      const mod: any = await import('js-aruco2');
+      const AR = (mod.default || mod).AR || mod.AR;
+      if (AR && AR.Detector) return AR;
+    } catch { /* give up */ }
+    return null;
+  })();
+  return arModulePromise;
+}
+
 // Geometric fiducial detector (dictionary-independent). The Astrobotany markers
 // use CUSTOM corner icons that generic ArUco/AprilTag decoders do not read, so
 // we find the 4 dark corner SQUARES by contour geometry instead — the same
@@ -306,13 +334,7 @@ export async function detectMarkerCorners(
   const cvQuad = await detectQuadCV(data, w, h);
   if (cvQuad) return { corners: orderCorners(cvQuad), found: 4 };
 
-  let AR: any;
-  try {
-    const mod: any = await import('js-aruco2');
-    AR = (mod.default || mod).AR || mod.AR;
-  } catch {
-    return { corners: null, found: 0 };
-  }
+  const AR: any = await loadAR();
   if (!AR || !AR.Detector) return { corners: null, found: 0 };
 
   let markers: any[] = [];
