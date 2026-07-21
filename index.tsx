@@ -158,6 +158,10 @@ const DEMO_IMAGES = [
     url: 'demos/medicago_marker.jpg'
   },
   {
+    label: 'ArUco marker target · tilted (fallback test)',
+    url: 'demos/aruco_markers_demo.png'
+  },
+  {
     label: 'Fast plants · two colour morphs',
     url: 'demos/fastplants_colour.jpg'
   },
@@ -829,8 +833,12 @@ const App = () => {
 
   const handleDetectMarker = async () => {
     const raw = rawImageData(); if (!raw) return;
+    // ?detector=aruco forces the ArUco-decoder fallback (skips the geometric
+    // square finder, which otherwise always wins on real ArUco marker images).
+    // Handy with the "ArUco marker target" demo to test the decoder path.
+    const skipGeometric = new URLSearchParams(window.location.search).get('detector') === 'aruco';
     setState(s => ({ ...s, isDetectingMarker: true, activeCalibrationTarget: 'astro' }));
-    const det = await detectMarkerCorners(raw.data, raw.w, raw.h);
+    const det = await detectMarkerCorners(raw.data, raw.w, raw.h, { skipGeometric });
     // Only trust a clean 4-fiducial detection. Generic ArUco decoders give
     // unreliable partial/false matches on these custom markers, so for anything
     // less we seed a predictable centred quad for the user to place by hand.

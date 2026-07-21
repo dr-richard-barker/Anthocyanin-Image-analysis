@@ -328,10 +328,16 @@ async function detectQuadCV(data: Uint8ClampedArray, w: number, h: number): Prom
 // geometric detector first (reliable for the custom Astrobotany fiducials), then
 // falls back to ArUco decoding (which sometimes recovers a couple of corners on
 // glary frames the geometric pass misses).
+//
+// `skipGeometric` forces the ArUco-decoder path. An ArUco marker is built from
+// nested squares, so the geometric detector always locks onto its cells/border
+// first — the only way to exercise the ArUco fallback on a real marker image
+// (e.g. the "ArUco marker target" demo via ?detector=aruco) is to skip geometric.
 export async function detectMarkerCorners(
-  data: Uint8ClampedArray, w: number, h: number
+  data: Uint8ClampedArray, w: number, h: number,
+  opts: { skipGeometric?: boolean } = {}
 ): Promise<{ corners: Pt[] | null; found: number }> {
-  const cvQuad = await detectQuadCV(data, w, h);
+  const cvQuad = opts.skipGeometric ? null : await detectQuadCV(data, w, h);
   if (cvQuad) return { corners: orderCorners(cvQuad), found: 4 };
 
   const AR: any = await loadAR();

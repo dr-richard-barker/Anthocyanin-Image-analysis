@@ -139,10 +139,11 @@ and colour reference.
 Full design + PlantCV interoperability write-up: **[docs/astrocalibration.md](docs/astrocalibration.md)**.
 The marker is the AIRI *Bio Imaging Spectrum 5 cm* sticker ([order here](https://www.stickermule.com/drb2025/item/19181049)):
 4 corner ArUco fiducials + colour chips + grayscale ramp + 0–5 cm ruler.
-- [x] Bundle demo images: a clean well-exposed marker (Medicago ground control), two colour morphs (fast plants), plus the ExoLab-11 timelapse and a Hydra-1 segmentation example.
+- [x] Bundle demo images: a clean well-exposed marker (Medicago ground control), a tilted ArUco marker target (fallback test), two colour morphs (fast plants), plus the ExoLab-11 timelapse and a Hydra-1 segmentation example.
 - [x] Hard-code the 15-chip `astro_color_matrix()` standard and apply **affine colour correction** (PlantCV-equivalent) in the canvas pipeline ([`colorcalib.ts`](colorcalib.ts)), with draggable corners + a live residual readout.
 - [x] **[PlantCV Pro notebook](notebooks/plantcv_pro_astrocalibration.ipynb)** — the robust automated path (geometric fiducial detection → `affine_color_correction` → segmentation → CSV), sharing the same 15-chip standard.
 - [x] **Reliable in-browser marker detection.** Generic ArUco/AprilTag decoders can't read the Astrobotany *custom-icon* fiducials, so the browser now uses a **geometric contour detector** (dark-square fiducials via js-aruco2's bundled CV primitives — the same method as the notebook). One click on a clean marker gives a **4/4 auto-detect + colour correction** (e.g. the Medicago demo: residual ≈ 0.12); ArUco is kept as a fallback and manual corner dragging always remains.
+- [x] **Testing the ArUco fallback.** The *ArUco marker target · tilted* demo carries four real `ARUCO_MIP_36h12` fiducials (ids 0–3) on a perspective-skewed plane ([generator](scripts/gen_aruco_demo.mjs)). Because an ArUco marker is built from nested squares, the geometric detector always locks onto its cells first — so to exercise the standard ArUco decoder path, append **`?detector=aruco`** to the URL (e.g. `…/index.html?detector=aruco`), select that demo, and click **Detect** for a 4/4 decode via the fallback.
 - [ ] Perspective homography + auto-rotation from the fiducials (currently bilinear + manual tilt).
 - [ ] Print/document the marker chip-layout spec as an SVG/PDF in this repo.
 
