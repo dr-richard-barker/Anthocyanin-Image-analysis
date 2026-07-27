@@ -38,7 +38,7 @@
       if (new URLSearchParams(location.search).get('embed') === '1') {
         document.documentElement.classList.add('cose-embed');
         var s = document.createElement('style');
-        s.textContent = '.cose-hero,.topbar,.sitebar,.map-scrim,.cose-theme-btn,.map-toggle,.cose-brand{display:none!important} body{margin:0!important;padding:0!important}';
+        s.textContent = '.cose-hero,.topbar,.sitebar,.map-scrim,.cose-theme-btn,.map-toggle,.cose-brand{display:none!important} body{margin:0!important;padding:0!important} .page,body.map-open .page{margin-left:0!important;margin-right:0!important}';
         document.head.appendChild(s);
       }
     </script>
