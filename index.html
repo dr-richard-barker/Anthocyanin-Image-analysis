@@ -32,6 +32,16 @@
         font-family: 'JetBrains Mono', monospace;
       }
     </style>
+    <script>
+      /* Embedded inside the AstroBotany database (?embed=1): hide the CoSE
+         cross-site chrome + hero so the tool blends into the host shell. */
+      if (new URLSearchParams(location.search).get('embed') === '1') {
+        document.documentElement.classList.add('cose-embed');
+        var s = document.createElement('style');
+        s.textContent = '.cose-hero,.topbar,.sitebar,.map-scrim,.cose-theme-btn,.map-toggle,.cose-brand{display:none!important} body{margin:0!important;padding:0!important}';
+        document.head.appendChild(s);
+      }
+    </script>
 </head>
   <body data-site-id="Anthocyanin-Image-analysis" data-brand-logo="cose/cose-logo.png">
     <header class="cose-hero">
