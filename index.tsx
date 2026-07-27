@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { ASTRO_CHIPS, detectMarkerCorners, fitFromQuad, scaleAndRotation, chipImagePoints, applyAffineToImageData, type Pt } from './colorcalib';
+import { putResult, currentRef } from './cose-results';
 
 // --- Types ---
 
@@ -497,6 +498,33 @@ const App = () => {
       return statToRow(img, gs, ctx);
     });
     triggerDownload(buildCsvText(rows), `phenotype_${img.replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_')}.csv`);
+  };
+
+  // Write tailored metrics back to the AstroBotany database (shared same-origin
+  // store), keyed to the image the database handed off via ?ref=.
+  const [dbSent, setDbSent] = useState(false);
+  const hasRef = new URLSearchParams(location.search).has('ref');
+  const sendResultsToDb = async () => {
+    const s = stateRef.current;
+    const groups = s.roiGroups.filter(g => (g.stats?.pixelCount || 0) > 0);
+    if (!groups.length) { alert('Segment at least one ROI group first.'); return; }
+    const n = groups.length;
+    const totalArea = groups.reduce((a, g) => a + (g.stats?.areaCm2 || 0), 0);
+    const totalPx = groups.reduce((a, g) => a + (g.stats?.pixelCount || 0), 0);
+    const mean = (f: (g: any) => number) => groups.reduce((a, g) => a + f(g), 0) / n;
+    const active = s.gallery[s.activeImageIndex];
+    const metrics: Record<string, string | number> = {
+      'Groups analysed': n,
+      'Total leaf area': s.pixelsPerCm ? `${totalArea.toFixed(2)} cm²` : `${totalPx} px`,
+      'Mean est. anthocyanin': mean(g => g.stats?.anthocyanin || 0).toFixed(3),
+      'Mean NGRDI (greenness)': mean(g => g.stats?.meanNGRDI || 0).toFixed(3),
+      'Mean Green Index': mean(g => g.stats?.meanGI || 0).toFixed(3),
+      'Scale (px/cm)': s.pixelsPerCm ? s.pixelsPerCm.toFixed(2) : 'uncalibrated',
+    };
+    try {
+      await putResult({ ref: currentRef(active?.url), imageUrl: active?.url || '', tool: 'leaf-pigment-size', toolName: 'Leaf Pigment & Size', metrics, generatedAt: new Date().toISOString() });
+      setDbSent(true); setTimeout(() => setDbSent(false), 3000);
+    } catch (e) { alert('Could not save results: ' + (e as Error).message); }
   };
 
   // --- Batch processing: apply the current ROIs + calibration to many images ---
@@ -1332,6 +1360,7 @@ const App = () => {
                 </div>
                 <div className="flex items-center gap-4 print:hidden">
                    <button onClick={downloadCSV} className="flex items-center gap-2 px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold shadow-lg transition-all"><Download size={18}/> CSV</button>
+                   {hasRef && <button onClick={sendResultsToDb} className="flex items-center gap-2 px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded font-bold shadow-lg transition-all">{dbSent ? '✓ Sent to database' : 'Send to AstroBotany DB'}</button>}
                    <button onClick={() => window.print()} className="flex items-center gap-2 px-6 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded font-bold shadow-lg transition-all"><Printer size={18}/> Print / PDF</button>
                    <button onClick={() => setState(s => ({...s, activeTab: 'analysis'}))} className="px-4 py-2 border border-slate-300 rounded font-medium">Exit</button>
                 </div>
