@@ -992,6 +992,19 @@ const App = () => {
     setState(s => ({ ...s, gallery: [...s.gallery, { id: `upload-${s.gallery.length}`, name: label, url }], activeImageIndex: s.gallery.length }));
   };
 
+  // Auto-load an image passed in via ?image=<url> — e.g. "Open in Anthocyanin"
+  // from the AstroBotany Calibration Image Database. The image must be
+  // CORS-readable (Epicollect5 media and raw.githubusercontent.com both are) so
+  // the canvas analysis can run on it.
+  useEffect(() => {
+    const src = new URLSearchParams(window.location.search).get('image');
+    if (!src) return;
+    try {
+      const u = decodeURIComponent(src);
+      handleImageUpload(u, (u.split('/').pop() || 'linked image').split('?')[0]);
+    } catch { /* ignore malformed ?image= */ }
+  }, []);
+
   const handleGenerateReport = async () => {
     if (!loadedImageRef.current) return;
     
